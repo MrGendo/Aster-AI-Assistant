@@ -38,8 +38,22 @@ BUILTIN = [
         },
     },
     {
-        "name": "news_fetch",
-        "kind": "tool",
+        "name": "llm_task",
+        "kind": "task",
+        "risk_level": "L0",  # 进程内模型调用（同 chat），无子进程无副作用
+        "entry": "(in-process)",
+        "descriptor": {
+            "name": "通用文本加工（LLM）",
+            "purpose": "摘要/翻译/改写/整理等任意文本加工，作为协作链的通用加工步骤",
+            "not_for": "确定性计算、需要精确计数的任务",
+            "input": "{\"prompt\": \"加工指令\", \"text\": \"待加工内容（可 $N.key 引用上游）\"}",
+            "output": "{\"text\": \"加工结果\"}",
+            "cost": "一次模型调用",
+            "limits": "不访问网络不读写文件；输出为生成内容需评审步把关",
+        },
+    },
+    {
+        "name": "news_fetch",        "kind": "tool",
         "risk_level": "L0",
         "entry": "news_fetch/run.py",
         "descriptor": {

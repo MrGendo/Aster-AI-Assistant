@@ -9,6 +9,7 @@ import time
 
 from .. import tsm
 from ..db import connect, tx
+# planner 延迟导入（避免与 core 循环依赖）
 from ..log import get_logger
 from ..memory import service as memory_svc
 from ..providers import router as provider
@@ -28,6 +29,10 @@ TEMPLATES = {
 
 def classify(goal: str) -> str:
     """意图分类：先用确定性规则（快且零成本），LLM 可用且规则未命中时再问模型"""
+    if GITHUB_RE.search(goal) and re.search(r"摘要|总结|翻译|写成|点评", goal):
+        return "planned"  # 复合目标（分析+加工）→ 多步协作路径
+    if goal.startswith("规划执行：") or goal.startswith("规划执行:"):
+        return "planned"  # 显式逃逸口：用户强制走计划路径
     if GITHUB_RE.search(goal):
         return "repo_analysis"
     if re.search(r"热点|日报", goal) and len(goal) > 12:
@@ -98,6 +103,16 @@ async def execute(task_id: int) -> None:
         if not task:
             return
         intent = task["intent"]
+
+        # 计划路径：LLM 产出多步协作计划；规划失败回退 chat（任务不因规划器而失败）
+        if intent == "planned":
+            ok = await _execute_planned(conn, task)
+            if ok is not None:
+                return
+            intent = "chat"  # 回退：按对话路径交付
+            with tx(conn):
+                conn.execute("UPDATE tasks SET intent='chat' WHERE id=?", (task_id,))
+            task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
 
         # chat 型：无步骤，直接给交付（Phase 1 的对话即任务）
         if intent not in TEMPLATES:
@@ -227,6 +242,148 @@ async def execute(task_id: int) -> None:
             pass
     finally:
         conn.close()
+
+
+async def _execute_planned(conn, task) -> bool | None:
+    """计划路径执行：规划 → 建步 → 顺序执行（占位符数据流/接管/评审/统计）。
+    返回 True=已终态收尾，False=规划失败需回退 chat，None 不应发生。"""
+    from . import planner as planner_mod
+
+    goal = task["goal"].removeprefix("规划执行：").removeprefix("规划执行:")
+    _set_status(conn, task["id"], tsm.PLANNING)
+    steps = await asyncio.to_thread(planner_mod.make_plan, conn, goal)
+    if not steps:
+        log.info("任务 %s 规划失败，回退对话路径", task["id"])
+        return False
+
+    # 计划落库（含依赖与输出键，UI/审计可查）
+    import time as _t
+    with tx(conn):
+        conn.execute("UPDATE tasks SET plan_json=?, updated_at=? WHERE id=?",
+                     (json.dumps(steps, ensure_ascii=False), int(_t.time()), task["id"]))
+        for i, st in enumerate(steps, 1):
+            deps = [int(m.group(1)) for v in (st.get("input") or {}).values()
+                    if (m := re.match(r"^\$(\d+)\.", str(v)))]
+            conn.execute(
+                "INSERT INTO task_steps(task_id, seq, step_desc, status, output_key, depends_on, "
+                "input_json) VALUES(?,?,?,?,?,?,?)",
+                (task["id"], i,
+                 f"{st.get('desc', '')}［能力 {st['capability']}{'←依赖步' + str(deps) if deps else ''}］",
+                 "pending", st.get("output_key") or "output",
+                 json.dumps(deps), json.dumps(st.get("input", {}), ensure_ascii=False)),
+            )
+    _set_status(conn, task["id"], tsm.EXECUTING)
+
+    outputs: dict[int, dict] = {}
+    step_rows = conn.execute(
+        "SELECT * FROM task_steps WHERE task_id=? ORDER BY seq", (task["id"],)
+    ).fetchall()
+    deadline = time.time() + 1800  # 失控闸二：总超时 30 分钟
+
+    for row in step_rows:
+        st = steps[row["seq"] - 1]
+        if time.time() > deadline:
+            _fail(conn, task["id"], "任务超过总时限（30 分钟）被中止")
+            return True
+        if conn.execute("SELECT cancel_requested FROM tasks WHERE id=?",
+                        (task["id"],)).fetchone()[0]:
+            _set_status(conn, task["id"], tsm.CANCELLED)
+            return True
+
+        # 占位符替换：$N.key → 上游输出值（PRD §7.3 交接包最小实现）
+        # 解包规则：引用键恰为 output_key 时拿到的是整份输出；若输出内含同名字段则取该字段
+        payload = {}
+        for k, v in (st.get("input") or {}).items():
+            m = re.match(r"^\$(\d+)\.(\w+)$", str(v))
+            if not m:
+                payload[k] = v
+                continue
+            val = outputs.get(int(m.group(1)), {}).get(m.group(2))
+            if isinstance(val, dict) and m.group(2) in val:
+                val = val[m.group(2)]
+            payload[k] = val
+
+        result = None
+        # 伪能力 llm_verify：对上游输出做 LLM 评审（不进注册表，不走网关子进程）
+        if st["capability"] == "llm_verify":
+            result = await asyncio.to_thread(_llm_verify, st.get("verify", "输出质量合格"),
+                                             goal, outputs)
+        elif st["capability"] == "llm_task":
+            result = await asyncio.to_thread(_llm_task, payload)
+        else:
+            for cand in [st["capability"]] + list(st.get("fallback") or []):
+                cap = registry.get_active(conn, cand)
+                if not cap:
+                    continue
+                result = await asyncio.to_thread(
+                    runner.run_capability, conn, cap, task["id"], row["id"], payload)
+                if result.ok:
+                    break
+                if result.pending_approval:
+                    _set_status(conn, task["id"], tsm.AWAITING_USER)
+                    with tx(conn):
+                        conn.execute("UPDATE tasks SET error=?, updated_at=? WHERE id=?",
+                                     (result.error, int(time.time()), task["id"]))
+                        conn.execute("UPDATE task_steps SET status='pending', error=? WHERE id=?",
+                                     (result.error, row["id"]))
+                    return True
+                log.info("步骤 %s 能力 %s 失败，尝试接管", row["seq"], cand)
+        if not result or not result.ok:
+            reason = result.error if result else "无可用能力"
+            with tx(conn):
+                conn.execute("UPDATE task_steps SET status='failed', error=?, finished_at=? "
+                             "WHERE id=?", (reason, int(time.time()), row["id"]))
+            _fail(conn, task["id"], f"步骤 {row['seq']} 失败：{reason}")
+            return True
+
+        # 输出按声明的 output_key 寻址：引用该键即得整份输出（dict 由消费方序列化）
+        outputs[row["seq"]] = {st.get("output_key") or "output": result.output}
+        with tx(conn):
+            conn.execute("UPDATE task_steps SET status='done', output_ref=?, finished_at=? "
+                         "WHERE id=?", (str(result.output)[:2000], int(time.time()), row["id"]))
+
+    # 交付：最后一步输出即交付物；评审步通过与否已在循环内判定
+    _set_status(conn, task["id"], tsm.VERIFYING)
+    last = outputs[max(outputs)]
+    summary = last.get("digest_markdown") or last.get("text") or last.get("summary") \
+        or last.get("result") or json.dumps(last, ensure_ascii=False)[:600]
+    _finish(conn, task["id"], summary=summary)
+    return True
+
+
+def _llm_task(payload: dict) -> "runner.RunResult":
+    """通用文本加工步：prompt 作系统指令，text 作待加工内容"""
+    from ..runtime.runner import RunResult
+    try:
+        text = payload.get("text", "")
+        if isinstance(text, (dict, list)):
+            text = json.dumps(text, ensure_ascii=False)
+        ans = provider.chat(
+            [{"role": "user", "content": str(text)[:12000]}],
+            system=str(payload.get("prompt") or "整理要点，输出简洁中文"),
+        )
+        return RunResult(bool(ans.strip()), 0, {"text": ans.strip()})
+    except Exception as e:
+        return RunResult(False, 0, {}, f"文本加工失败：{e}")
+
+
+def _llm_verify(criteria: str, goal: str, outputs: dict) -> "runner.RunResult":
+    """评审步（PRD §7.5）：LLM 按预设标准独立检查，不通过即失败——不伪装成功"""
+    from ..runtime.runner import RunResult
+    try:
+        raw = provider.chat(
+            [{"role": "user",
+              "content": f"目标：{goal}\n上游产出：{json.dumps(outputs, ensure_ascii=False)[:6000]}"}],
+            system=f"你是独立评审。按标准判断产出是否合格：{criteria}\n"
+                   f'只输出 JSON：{{"pass": true/false, "reason": "理由"}}',
+            max_tokens=300,
+        )
+        d = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+        ok = bool(d.get("pass"))
+        return RunResult(ok, 0, {"pass": ok, "reason": d.get("reason", "")},
+                         "" if ok else f"评审未通过：{d.get('reason', '')}")
+    except Exception as e:
+        return RunResult(False, 0, {}, f"评审执行失败：{e}")
 
 
 def _build_payload(intent: str, goal: str) -> dict:

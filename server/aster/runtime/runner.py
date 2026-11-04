@@ -120,6 +120,15 @@ def run_capability(
             "SELECT id FROM tool_calls WHERE run_id=? ORDER BY id DESC LIMIT 1)",
             ("success" if ok else "failed", int(time.time()), run_id),
         )
+        # 能力表现统计（Stage 3 路由降权的依据）
+        conn.execute(
+            "INSERT INTO capability_stats(capability_id, calls, ok, avg_ms, updated_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(capability_id) DO UPDATE SET "
+            "calls=calls+1, ok=ok+excluded.ok, "
+            "avg_ms=CAST((avg_ms*calls+excluded.avg_ms)/(calls+1) AS INTEGER), "
+            "updated_at=excluded.updated_at",
+            (cap_row["id"], 1, 1 if ok else 0, duration_ms, int(time.time())),
+        )
     if not ok and not error:
         # worker 在 stdout JSON 里自带 error 字段时优先透传（比"exit=N"可读）
         if isinstance(output, dict) and output.get("error"):
