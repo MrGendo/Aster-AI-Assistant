@@ -3,7 +3,7 @@ from ..db import connect, migrate
 from ..gateway import core as gateway
 from ..providers import router as provider
 from ..runtime import registry
-from . import caps, discovery, memories, system, tasks
+from . import caps, discovery, evolution, memories, system, tasks
 
 
 def create_app() -> "FastAPI":
@@ -25,6 +25,15 @@ def create_app() -> "FastAPI":
         registry.ensure_builtin(conn)
         gateway.expire_stale(conn)
         provider.bootstrap_from_claude_cli(conn)  # 首次启动复用 claude CLI 的 GLM 配置
+        # Stage 4：固定回放集种子（须在 migrate 之后）
+        with conn:
+            for name, goal, ctrl in [
+                ("仓库分析", "分析 https://github.com/asg017/sqlite-vec 的基本情况", 0),
+                ("热点日报", "把这几条热点整理成日报：A 发布新模型；B 发布新模型引起讨论；C 通过新法案", 0),
+                ("对照-文本统计", "统计这段文本的字数：受控进化对照任务", 1),
+            ]:
+                conn.execute("INSERT OR IGNORE INTO replay_set(name, task_goal, is_control) "
+                             "VALUES(?,?,?)", (name, goal, ctrl))
         conn.close()
         from ..watch import loop as watch_loop
         watch_loop.start()  # Stage 2：watchlist 后台巡检
@@ -34,6 +43,7 @@ def create_app() -> "FastAPI":
     app.include_router(memories.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(discovery.router, prefix="/api")
+    app.include_router(evolution.router, prefix="/api")
 
     # 前端产物：构建后由服务直接托管（API 路由先注册，静态挂载兜底其余路径）
     from fastapi.staticfiles import StaticFiles
