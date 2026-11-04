@@ -12,6 +12,8 @@ const sys = ref(null);
 const goalText = ref("");
 const detail = ref(null);
 const runningTask = ref(null);
+// 首页对话式回显：提交后就地展示执行状态与最终回答（PRD §10.4/§10.3）
+const activeTask = ref(null);
 const newMem = ref({ scope: "preference", content: "" });
 // Stage 2：发现与评估
 const cands = ref([]);
@@ -65,7 +67,12 @@ async function submitGoal() {
   const goal = goalText.value.trim();
   if (!goal) return;
   const r = await api("/tasks", { method: "POST", body: JSON.stringify({ goal }) });
-  if (r.id) { goalText.value = ""; await refresh(); watchTask(r.id); }
+  if (r.id) {
+    goalText.value = "";
+    activeTask.value = { id: r.id, goal, status: "pending" };
+    await refresh();
+    watchTask(r.id);
+  }
 }
 
 function watchTask(id) {
@@ -73,7 +80,17 @@ function watchTask(id) {
   const es = new EventSource(`/api/tasks/${id}/events`);
   runningTask.value = es;
   es.onmessage = (ev) => {
-    if (ev.data === "[DONE]") { es.close(); runningTask.value = null; refresh(); openDetail(id); }
+    if (ev.data === "[DONE]") {
+      es.close(); runningTask.value = null;
+      // 完成后把完整回答拉回首页答案卡，同时刷新列表
+      api(`/tasks/${id}`).then((d) => { activeTask.value = d; });
+      refresh();
+    } else {
+      // 状态每次变化拉一次详情：首页就地刷新步骤进度（任务级状态变更次数有限，开销可忽略）
+      api(`/tasks/${id}`).then((d) => {
+        if (activeTask.value && activeTask.value.id === id) activeTask.value = d;
+      });
+    }
   };
   es.onerror = () => { es.close(); runningTask.value = null; };
 }
@@ -130,7 +147,24 @@ onMounted(refresh);
           <button class="primary" @click="submitGoal">开始任务</button>
           <span class="hint">⌘/Ctrl + Enter 发送</span>
         </div>
-        <div v-if="runningTask" class="card running">任务执行中，进度见任务中心…</div>
+        <div v-if="activeTask" class="card answer">
+          <div class="row spread">
+            <span class="st" :class="activeTask.status">{{ STATUS_TEXT[activeTask.status] || activeTask.status }}</span>
+            <button class="ghost" @click="activeTask = null">收起</button>
+          </div>
+          <!-- 运行中：状态与步骤实时可见（PRD §10.4） -->
+          <div v-if="!isTerminal(activeTask.status)" class="running-note">
+            正在处理你的请求…（当前状态：{{ STATUS_TEXT[activeTask.status] || activeTask.status }}）
+            <div v-for="s in activeTask.steps || []" :key="s.id" class="step">
+              步骤 {{ s.seq }}：{{ s.step_desc }} — {{ s.status }}
+            </div>
+          </div>
+          <!-- 完成：答案就地展示，不必再去任务中心翻 -->
+          <pre v-else-if="activeTask.result_summary" class="result">{{ activeTask.result_summary }}</pre>
+          <pre v-else-if="activeTask.error" class="result err">{{ activeTask.error }}</pre>
+          <button v-if="isTerminal(activeTask.status)" class="ghost"
+                  @click="openDetail(activeTask.id); tab = 'tasks'">查看完整过程 →</button>
+        </div>
         <h2>最近任务</h2>
         <div v-for="t in homeRecent" :key="t.id" class="card task-row" @click="openDetail(t.id); tab = 'tasks'">
           <span class="st" :class="t.status">{{ STATUS_TEXT[t.status] || t.status }}</span>
