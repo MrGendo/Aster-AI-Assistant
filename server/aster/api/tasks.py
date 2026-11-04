@@ -128,6 +128,49 @@ async def _recreate_and_run(task_id: int, goal: str) -> None:
     await orchestrator.execute(task_id)
 
 
+@router.delete("/tasks/{task_id}")
+def delete_task(task_id: int) -> dict:
+    """删除任务与步骤；runs/tool_calls 审计保留（PRD §12.5 可追溯性优先于整洁）"""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "任务不存在")
+        if row["status"] in ("executing", "planning", "verifying"):
+            raise HTTPException(409, "运行中的任务请先取消再删除")
+        with conn:
+            # 审计策略：runs/tool_calls 保留（能力级记录可追溯），任务/步骤引用置空解除外键
+            # 注意 runs.step_id 也引用 task_steps——漏掉它会 FK 失败（实测教训）
+            conn.execute("UPDATE runs SET task_id=NULL, step_id=NULL WHERE task_id=?", (task_id,))
+            conn.execute("UPDATE tool_calls SET task_id=NULL WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
+            conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+@router.patch("/tasks/{task_id}")
+def patch_task(task_id: int, body: dict) -> dict:
+    """编辑任务目标（仅非运行中状态；改完可重试生效）"""
+    goal = (body.get("goal") or "").strip()
+    if not goal:
+        raise HTTPException(422, "goal 不能为空")
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "任务不存在")
+        if row["status"] in ("executing", "planning", "verifying"):
+            raise HTTPException(409, "运行中的任务不可编辑")
+        with conn:
+            conn.execute("UPDATE tasks SET goal=?, updated_at=? WHERE id=?",
+                         (goal, int(__import__("time").time()), task_id))
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
 @router.get("/tasks/{task_id}/events")
 async def task_events(task_id: int) -> StreamingResponse:
     """SSE：轮询任务行变化推送（Phase 1 轮询够用，后续换事件总线）"""

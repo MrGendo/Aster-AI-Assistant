@@ -14,6 +14,18 @@ const detail = ref(null);
 const runningTask = ref(null);
 // 首页对话式回显：提交后就地展示执行状态与最终回答（PRD §10.4/§10.3）
 const activeTask = ref(null);
+// 任务中心就地展开 + 行内管理
+const detailId = ref(null);
+async function toggleDetail(tid) {
+  if (detailId.value === tid) { detailId.value = null; return; }
+  detailId.value = tid;
+  detail.value = await api(`/tasks/${tid}`);
+}
+async function deleteTask(tid) {
+  if (!confirm(`确认删除任务 #${tid}？（执行审计记录会保留）`)) return;
+  await api(`/tasks/${tid}`, { method: "DELETE" });
+  refresh();
+}
 // 历史就地展开（不跳任务中心）
 const expandedId = ref(null);
 const histDetail = ref(null);
@@ -189,13 +201,13 @@ onMounted(() => {
           <span class="hint">⌘/Ctrl + Enter 发送</span>
         </div>
 
-        <!-- 当前任务：流程/审批/结果都在这张卡，不跳转任何页面 -->
+        <!-- 当前任务：对话式呈现——问题气泡 → 过程 → 专属回答面板（借鉴 shadcn-chatbot 模式） -->
         <div v-if="activeTask" class="card answer">
           <div class="row spread">
             <span class="st" :class="activeTask.status">{{ STATUS_TEXT[activeTask.status] || activeTask.status }}</span>
             <button class="ghost" @click="activeTask = null">收起</button>
           </div>
-          <p class="goal-full">{{ activeTask.goal }}</p>
+          <div class="q-bubble">{{ activeTask.goal }}</div>
           <!-- 步骤时间线：运行中实时刷（PRD §10.4） -->
           <div v-for="s in activeTask.steps || []" :key="s.id" class="step"
                :class="{ running: s.status === 'running' }">
@@ -212,26 +224,29 @@ onMounted(() => {
               </span>
             </div>
           </div>
-          <!-- 结果：热点类渲染事件卡榜单，其余文本 -->
-          <div v-if="isTerminal(activeTask.status) && activeTask.result_detail?.top_items" class="hotboard">
-            <div v-for="(it, i) in activeTask.result_detail.top_items" :key="i" class="hotcard">
-              <span class="rank" :class="'r' + (i + 1)">{{ i + 1 }}</span>
-              <div class="hotbody">
-                <a v-if="it.url" :href="it.url" target="_blank" class="hottitle">{{ it.title_cn || it.title }}</a>
-                <span v-else class="hottitle">{{ it.title_cn || it.title }}</span>
-                <div v-if="it.title_cn && it.title_cn !== it.title" class="hotorig">{{ it.title }}</div>
-                <div v-if="it.summary_cn" class="hotsum">{{ it.summary_cn }}</div>
-                <div class="hotmeta">
-                  <span class="tag">{{ it.category }}</span>
-                  <span>{{ it.source }}</span>
-                  <span class="heat">热度 {{ it.weighted_score }}</span>
+          <!-- 回答：专属面板（不再混在过程文本里），热点类为事件卡榜单 -->
+          <div v-if="isTerminal(activeTask.status)" class="answer-panel">
+            <div class="answer-head">回答</div>
+            <div v-if="activeTask.result_detail?.top_items" class="hotboard">
+              <div v-for="(it, i) in activeTask.result_detail.top_items" :key="i" class="hotcard">
+                <span class="rank" :class="'r' + (i + 1)">{{ i + 1 }}</span>
+                <div class="hotbody">
+                  <a v-if="it.url" :href="it.url" target="_blank" class="hottitle">{{ it.title_cn || it.title }}</a>
+                  <span v-else class="hottitle">{{ it.title_cn || it.title }}</span>
+                  <div v-if="it.title_cn && it.title_cn !== it.title" class="hotorig">{{ it.title }}</div>
+                  <div v-if="it.summary_cn" class="hotsum">{{ it.summary_cn }}</div>
+                  <div class="hotmeta">
+                    <span class="tag">{{ it.category }}</span>
+                    <span>{{ it.source }}</span>
+                    <span class="heat">热度 {{ it.weighted_score }}</span>
+                  </div>
                 </div>
               </div>
+              <p class="hint">输入 {{ activeTask.result_detail.total_input }} 条 · 聚合去重 {{ activeTask.result_detail.removed_duplicates }} 条同题报道</p>
             </div>
-            <p class="hint">输入 {{ activeTask.result_detail.total_input }} 条 · 聚合去重 {{ activeTask.result_detail.removed_duplicates }} 条同题报道</p>
+            <pre v-else-if="activeTask.result_summary" class="result">{{ activeTask.result_summary }}</pre>
+            <pre v-else-if="activeTask.error" class="result err">{{ activeTask.error }}</pre>
           </div>
-          <pre v-else-if="isTerminal(activeTask.status) && activeTask.result_summary" class="result">{{ activeTask.result_summary }}</pre>
-          <pre v-else-if="isTerminal(activeTask.status) && activeTask.error" class="result err">{{ activeTask.error }}</pre>
           <div v-if="['failed', 'cancelled', 'partial'].includes(activeTask.status)" class="row">
             <button @click="retryTask(activeTask.id); watchTask(activeTask.id)">重试</button>
           </div>
@@ -265,52 +280,56 @@ onMounted(() => {
         <p v-if="!homeRecent.length" class="empty">还没有任务。粘贴一个仓库链接试试，例如 https://github.com/asg017/sqlite-vec</p>
       </section>
 
-      <!-- 任务中心 -->
+      <!-- 任务中心：行内管理（就地展开，不再把详情甩到列表末尾） -->
       <section v-if="tab === 'tasks'">
         <h1>任务中心</h1>
-        <div class="task-list">
-          <div v-for="t in tasks" :key="t.id" class="card task-row" @click="openDetail(t.id)">
+        <template v-for="t in tasks" :key="t.id">
+          <div class="card task-row" @click="toggleDetail(t.id)">
             <span class="st" :class="t.status">{{ STATUS_TEXT[t.status] || t.status }}</span>
             <span class="goal">{{ t.goal.slice(0, 70) }}</span>
             <span class="time">{{ new Date(t.created_at * 1000).toLocaleString() }}</span>
+            <span class="row-actions" @click.stop>
+              <button v-if="!isTerminal(t.status)" class="ghost" @click="cancelTask(t.id)">取消</button>
+              <button v-if="['failed','cancelled','partial','awaiting_user'].includes(t.status)" class="ghost" @click="retryTask(t.id)">重试</button>
+              <button v-if="isTerminal(t.status)" class="ghost danger" @click="deleteTask(t.id)">删除</button>
+            </span>
           </div>
-        </div>
-        <div v-if="detail" class="detail card">
-          <div class="row spread">
-            <h2>#{{ detail.id }} <span class="st" :class="detail.status">{{ STATUS_TEXT[detail.status] }}</span></h2>
-            <div>
-              <button v-if="!isTerminal(detail.status)" @click="cancelTask(detail.id)">取消</button>
-              <button v-if="['failed','cancelled','partial'].includes(detail.status)" @click="retryTask(detail.id)">重试</button>
-              <button class="ghost" @click="detail = null">关闭</button>
+          <div v-if="detailId === t.id && detail" class="card detail">
+            <div class="row spread">
+              <h2>#{{ detail.id }} <span class="st" :class="detail.status">{{ STATUS_TEXT[detail.status] }}</span></h2>
+              <button class="ghost" @click="detailId = null">收起</button>
             </div>
-          </div>
-          <p class="goal-full">{{ detail.goal }}</p>
-          <div v-for="s in detail.steps" :key="s.id" class="step">
-            步骤 {{ s.seq }}：{{ s.step_desc }} — {{ s.status }}
-            <span v-if="s.error" class="err">{{ s.error }}</span>
-          </div>
-          <div v-if="detail.cancel_requested && !isTerminal(detail.status)" class="warn-note">已收到取消请求，将在当前步骤停止后生效</div>
-          <!-- 等待确认：审批按钮就在任务详情里，批准后自动重试（不再要求去设置页找） -->
-          <div v-if="detail.status === 'awaiting_user'" class="approval-box">
-            <b>需要你的确认</b>
-            <div v-for="a in approvalsFor(detail.id)" :key="a.id" class="row spread approval">
-              <span>{{ a.reason }}</span>
-              <span>
-                <button class="primary" @click="approveAndRetry(a.id, detail.id)">批准并继续</button>
-                <button @click="rejectApproval(a.id)">拒绝</button>
-              </span>
+            <p class="goal-full">{{ detail.goal }}</p>
+            <div v-for="s in detail.steps" :key="s.id" class="step"
+                 :class="{ running: s.status === 'running' }">
+              {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : '·' }}
+              步骤 {{ s.seq }}：{{ s.step_desc }}
+              <span v-if="s.error" class="err">{{ s.error }}</span>
             </div>
-            <p v-if="!approvalsFor(detail.id).length" class="hint">
-              没有待审批项——若此前已拒绝，可修改输入后重试任务。
-            </p>
+            <div v-if="detail.cancel_requested && !isTerminal(detail.status)" class="warn-note">已收到取消请求，将在当前步骤停止后生效</div>
+            <div v-if="detail.status === 'awaiting_user'" class="approval-box">
+              <div v-for="a in approvalsFor(detail.id)" :key="a.id" class="row spread approval">
+                <span>{{ a.reason }}</span>
+                <span>
+                  <button class="primary" @click="approveAndRetry(a.id, detail.id)">批准并继续</button>
+                  <button @click="rejectApproval(a.id)">拒绝</button>
+                </span>
+              </div>
+              <p v-if="!approvalsFor(detail.id).length" class="hint">
+                没有待审批项——若此前已拒绝，可修改输入后重试任务。
+              </p>
+            </div>
+            <div class="answer-panel" v-if="detail.result_summary || detail.error">
+              <div class="answer-head">{{ detail.error ? '错误' : '回答' }}</div>
+              <pre v-if="detail.result_summary" class="result">{{ detail.result_summary }}</pre>
+              <pre v-else class="result err">{{ detail.error }}</pre>
+            </div>
+            <details v-if="detail.result_detail">
+              <summary>完整报告（事实与推测已分级）</summary>
+              <pre class="result">{{ JSON.stringify(detail.result_detail, null, 2) }}</pre>
+            </details>
           </div>
-          <pre v-if="detail.result_summary" class="result">{{ detail.result_summary }}</pre>
-          <pre v-if="detail.error" class="result err">{{ detail.error }}</pre>
-          <details v-if="detail.result_detail">
-            <summary>完整报告（事实与推测已分级）</summary>
-            <pre class="result">{{ JSON.stringify(detail.result_detail, null, 2) }}</pre>
-          </details>
-        </div>
+        </template>
       </section>
 
       <!-- 能力中心 -->
@@ -504,4 +523,19 @@ a.hottitle:hover { color: var(--accent); }
 .approval-box { border-left: 3px solid var(--warn); padding: 8px 12px; margin: 8px 0;
                 background: var(--bg); border-radius: 8px; }
 .step.running { color: var(--run); font-weight: 600; }
+</style>
+<style scoped>
+/* 对话式回答呈现（借鉴 shadcn-chatbot 模式，零依赖自实现） */
+.q-bubble { background: color-mix(in srgb, var(--accent) 12%, transparent);
+            border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+            border-radius: 12px 12px 4px 12px; padding: 10px 14px; margin: 8px 0;
+            font-weight: 500; }
+.answer-panel { border: 1px solid var(--accent); border-radius: 10px;
+                margin: 10px 0 4px; overflow: hidden; }
+.answer-head { background: color-mix(in srgb, var(--accent) 15%, transparent);
+               color: var(--accent); font-size: 12px; font-weight: 700;
+               padding: 4px 12px; letter-spacing: 2px; }
+.answer-panel .result { border-radius: 0; margin: 0; }
+.row-actions button { padding: 2px 8px; font-size: 12px; }
+button.danger { color: var(--err); }
 </style>
