@@ -1,3 +1,3 @@
 # MEMORY.md
 
-- [Aster 项目阶段状态](project-aster-status.md) — 新 PRD 平台方向 Phase 1 主体完成并端到端跑通；待用户走查 1-8 与 Stage 2 批准
+- [Aster 项目阶段状态](project-aster-status.md) — Phase 1 全收口（提交 e810738）；Stage 2 spec/plan 待批准（含费用与沙箱边界两个知情确认）

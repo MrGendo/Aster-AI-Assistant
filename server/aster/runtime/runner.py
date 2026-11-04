@@ -7,7 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ..config import CAPABILITIES_DIR, RUNS_DIR, SANDBOX_DIR, WORKER_PYTHON
+from ..config import CAPABILITIES_DIR, DATA_DIR, RUNS_DIR, SANDBOX_DIR, WORKER_PYTHON
 from ..db import tx
 from ..gateway import core as gateway
 from ..log import get_logger
@@ -65,8 +65,14 @@ def run_capability(
         )
         run_id = cur.lastrowid
 
+    # 入口解析：_drafts/ 前缀指向数据目录下的适配草稿（生成能力），其余为内置能力
+    if entry.startswith("_drafts/"):
+        script = DATA_DIR / "drafts" / entry[len("_drafts/"):]
+    else:
+        script = CAPABILITIES_DIR / entry
+
     proc = subprocess.Popen(
-        [str(WORKER_PYTHON), str(CAPABILITIES_DIR / entry)],
+        [str(WORKER_PYTHON), str(script)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, start_new_session=True,  # 独立进程组：超时可整组终止
         env={**os.environ, "ASTER_SANDBOX": str(sandbox)},

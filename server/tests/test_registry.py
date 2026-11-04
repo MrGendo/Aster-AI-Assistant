@@ -14,9 +14,10 @@ def teardown_function(_):
 
 
 def test_migration_sets_version_and_idempotent():
-    assert current_version(conn) == 1
+    v = current_version(conn)
+    assert v >= 1  # 随迁移增加而增长，不写死具体版本号
     migrate(conn)  # 重跑不报错、不重复
-    assert current_version(conn) == 1
+    assert current_version(conn) == v
 
 
 def test_core_tables_exist():

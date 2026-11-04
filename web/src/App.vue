@@ -13,6 +13,11 @@ const goalText = ref("");
 const detail = ref(null);
 const runningTask = ref(null);
 const newMem = ref({ scope: "preference", content: "" });
+// Stage 2：发现与评估
+const cands = ref([]);
+const candUrl = ref("");
+const report = ref(null);
+const draft = ref(null);
 
 const STATUS_TEXT = {
   pending: "待处理", planning: "规划中", executing: "执行中", awaiting_user: "等待确认",
@@ -34,7 +39,27 @@ async function refresh() {
   memories.value = await api("/memories");
   pendingApprovals.value = await api("/approvals?status=pending");
   sys.value = await api("/system/status");
+  cands.value = await api("/candidates");
 }
+
+// Stage 2：候选评估流
+const LIFECYCLE_TEXT = {
+  discovered: "已发现", screened: "初筛过", deep_analysis: "深析过", compared: "已比较",
+  isolated_test: "测试过", integration_eval: "接入评估", pending_approval: "待批准",
+  integration_verified: "验证过", active: "已接入", archived: "已归档",
+};
+async function submitCand() {
+  const u = candUrl.value.trim();
+  if (!u) return;
+  await api("/candidates", { method: "POST", body: JSON.stringify({ repo_url: u }) });
+  candUrl.value = ""; refresh();
+}
+async function openReport(id) { report.value = await api(`/candidates/${id}/report`); }
+async function genScaffold(id) { await api(`/candidates/${id}/scaffold`, { method: "POST" }); }
+async function openDraft(id) { draft.value = await api(`/candidates/${id}/draft`); }
+async function testAdapter(id) { await api(`/candidates/${id}/test_adapter`, { method: "POST" }); refresh(); }
+async function integrateCand(id) { await api(`/candidates/${id}/integrate`, { method: "POST" }); refresh(); }
+async function archiveCand(id) { await api(`/candidates/${id}/archive`, { method: "POST", body: JSON.stringify({ reason: "用户手动归档" }) }); refresh(); }
 
 async function submitGoal() {
   const goal = goalText.value.trim();
@@ -87,7 +112,7 @@ onMounted(refresh);
   <div class="shell">
     <nav class="side">
       <div class="brand">Aster</div>
-      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['settings','设置']]"
+      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['settings','设置']]"
               :key="t[0]" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
       <div v-if="sys" class="side-status" :class="{ warn: sys.paused }">
         {{ sys.paused ? "已暂停" : sys.provider_ready ? "运行中" : "模型未配置" }}
@@ -165,6 +190,41 @@ onMounted(refresh);
           </div>
           <p>{{ JSON.parse(c.descriptor_json).purpose }}</p>
           <p class="meta">风险 {{ c.risk_level }} · 输入 {{ JSON.parse(c.descriptor_json).input }} · {{ JSON.parse(c.descriptor_json).cost }}</p>
+        </div>
+      </section>
+
+      <!-- 发现与评估（Stage 2）：结论先行，证据可展开（PRD §10.6） -->
+      <section v-if="tab === 'disc'">
+        <h1>发现与评估</h1>
+        <div class="row">
+          <input v-model="candUrl" placeholder="粘贴 GitHub 仓库链接启动评估" @keydown.enter="submitCand" />
+          <button class="primary" @click="submitCand">评估</button>
+        </div>
+        <div v-for="c in cands" :key="c.id" class="card cand">
+          <div class="row spread">
+            <div><b>{{ c.name }}</b> <span class="tag">{{ LIFECYCLE_TEXT[c.lifecycle] || c.lifecycle }}</span>
+              <span v-if="c.recommendation" class="tag rec">建议：{{ c.recommendation }}</span></div>
+            <div>
+              <button @click="openReport(c.id)">报告</button>
+              <button v-if="c.lifecycle === 'compared'" @click="genScaffold(c.id); openDraft(c.id)">生成适配草稿</button>
+              <button v-if="draft && c.lifecycle === 'compared'" @click="openDraft(c.id)">看草稿</button>
+              <button v-if="['compared','integration_eval'].includes(c.lifecycle)" @click="testAdapter(c.id)">隔离测试</button>
+              <button v-if="c.lifecycle === 'pending_approval'" class="primary" @click="integrateCand(c.id)">批准接入</button>
+              <button class="ghost" v-if="c.lifecycle !== 'archived'" @click="archiveCand(c.id)">归档</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="report" class="card">
+          <div class="row spread"><b>评估报告</b><button class="ghost" @click="report = null">关闭</button></div>
+          <p>建议 <b>{{ report.recommendation }}</b>（置信度 {{ report.confidence }}）—— {{ report.reason }}</p>
+          <details>
+            <summary>十二维评估与证据（verified 与 inferred 分级）</summary>
+            <pre class="result">{{ JSON.stringify({ 维度: report.dimensions_json, 证据: report.evidence_json, 同类仓: report.peers_json }, null, 2) }}</pre>
+          </details>
+        </div>
+        <div v-if="draft" class="card">
+          <div class="row spread"><b>适配草稿（须人工审阅后才可隔离测试）</b><button class="ghost" @click="draft = null">关闭</button></div>
+          <pre class="result">{{ draft.script }}</pre>
         </div>
       </section>
 
