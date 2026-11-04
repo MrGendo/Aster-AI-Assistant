@@ -145,11 +145,46 @@ async def execute(task_id: int) -> None:
 
         payload = _build_payload(intent, task["goal"])
         if payload.get("_empty"):
-            # 诚实失败：没有条目就没有日报，明确告知用户怎么补（PRD：不伪装成功）
-            _fail(conn, task_id,
-                  "没有从你的消息中提取到热点条目。请把新闻条目（标题/来源等）直接粘贴进来，"
-                  "或提供含条目的文本——本能力负责筛选排序，不负责联网抓取。")
-            return
+            # 没有条目 → 尝试用 news_fetch 抓取（两能力串联的最小协作：抓原料→筛选排序）
+            # 用户消息里的方向词（如"ai agent方向的"）作为抓取检索词
+            fetch_cap = registry.get_active(conn, "news_fetch")
+            if not fetch_cap:
+                _fail(conn, task_id,
+                      "没有从你的消息中提取到热点条目，且热点抓取能力不可用。请直接粘贴条目。")
+                return
+            query = re.sub(r"^(帮我|请)?(把|将|用)?.{0,12}?(热点|新闻)?(整理|汇总|生成|做成)(成)?(一份)?(今日|今天|行业|AI)?(热点)?日报", "", task["goal"]).strip("，,。：: ")
+            # HN 是英文源：方向词交 LLM 提取纯主题检索词（不带任务语义）
+            topic_cn = query or "科技热点"
+            if query and provider.available():
+                try:
+                    q = provider.chat(
+                        [{"role": "user", "content": task["goal"]}],
+                        system="提取用户想了解的主题的英文检索词（1-4个单词，只要主题本身，"
+                               "不要任务动词如 digest/generator/news/summarize）。只输出检索词。",
+                        max_tokens=20,
+                    ).strip().strip('"`\n')
+                    if 2 < len(q) < 60:
+                        query = q
+                except Exception:
+                    pass
+            fetch_res = await asyncio.to_thread(
+                runner.run_capability, conn, fetch_cap, task_id, None,
+                {"query": query or None, "limit": 30}, timeout_s=60,
+            )
+            items = fetch_res.output.get("items") if fetch_res.ok else None
+            if not items:
+                # 定向检索零命中 → 回退抓 HN 首页（泛热点），仍失败才认输
+                fetch_res = await asyncio.to_thread(
+                    runner.run_capability, conn, fetch_cap, task_id, None,
+                    {"query": None, "limit": 30}, timeout_s=60,
+                )
+                items = fetch_res.output.get("items") if fetch_res.ok else None
+                query = None
+            if items:
+                payload = {"topic": topic_cn, "top_n": 5, "items": items}
+            else:
+                _fail(conn, task_id, f"条目抓取失败：{fetch_res.error or '无结果'}。也可直接粘贴新闻条目重试。")
+                return
         with tx(conn):
             conn.execute(
                 "UPDATE task_steps SET status='running', input_json=?, started_at=? WHERE id=?",

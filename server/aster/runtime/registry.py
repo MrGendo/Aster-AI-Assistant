@@ -37,6 +37,21 @@ BUILTIN = [
             "limits": "纯本地计算",
         },
     },
+    {
+        "name": "news_fetch",
+        "kind": "tool",
+        "risk_level": "L0",
+        "entry": "news_fetch/run.py",
+        "descriptor": {
+            "name": "热点抓取（Hacker News）",
+            "purpose": "从 HN 公开 API 拉取条目作为热点日报的原料；支持按关键词检索",
+            "not_for": "中文站内热点（数据源后续扩展）",
+            "input": "query（可选关键词）、limit（默认30）",
+            "output": "条目数组 JSON",
+            "cost": "一次只读 HTTP 请求，秒级",
+            "limits": "仅白名单主机 hn.algolia.com；只读",
+        },
+    },
 ]
 
 

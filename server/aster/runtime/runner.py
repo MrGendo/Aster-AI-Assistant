@@ -121,6 +121,10 @@ def run_capability(
             ("success" if ok else "failed", int(time.time()), run_id),
         )
     if not ok and not error:
-        error = f"能力 {name} 执行失败（exit={proc.returncode}）"
+        # worker 在 stdout JSON 里自带 error 字段时优先透传（比"exit=N"可读）
+        if isinstance(output, dict) and output.get("error"):
+            error = str(output["error"])
+        else:
+            error = f"能力 {name} 执行失败（exit={proc.returncode}）"
     log.info("能力 %s 完成 ok=%s duration=%sms", name, ok, duration_ms)
     return RunResult(ok, proc.returncode, output, error, duration_ms)
