@@ -38,6 +38,21 @@ BUILTIN = [
         },
     },
     {
+        "name": "web_fetch",
+        "kind": "tool",
+        "risk_level": "L0",  # 只读 GET；SSRF 防护在 worker 内强制（内网段拒绝+逐跳校验）
+        "entry": "web_fetch/run.py",
+        "descriptor": {
+            "name": "网页抓取",
+            "purpose": "抓取网页正文（≤3000字）供摘要富化等下游使用",
+            "not_for": "需要 JS 渲染的页面、下载二进制",
+            "input": "{\"urls\": [\"https://...\"]}（≤5 条）",
+            "output": "{\"pages\": [{url, ok, title, text}]}",
+            "cost": "每页一次只读请求，秒级",
+            "limits": "仅 text/html 与 text/plain；512KB 上限；内网/保留地址一律拒绝",
+        },
+    },
+    {
         "name": "llm_task",
         "kind": "task",
         "risk_level": "L0",  # 进程内模型调用（同 chat），无子进程无副作用
