@@ -91,8 +91,9 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
         row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
         if not row:
             raise HTTPException(404, "任务不存在")
-        if row["status"] not in ("failed", "cancelled", "partial"):
-            raise HTTPException(409, "仅失败/取消/部分完成的任务可重试")
+        if row["status"] not in ("failed", "cancelled", "partial", "awaiting_user", "pending"):
+            # awaiting_user：审批后续跑；pending：后台任务崩溃后的自愈重试（都曾是真的坑）
+            raise HTTPException(409, "仅失败/取消/部分完成/等待确认/待处理的任务可重试")
         from .. import tsm as tsm_mod
         with conn:
             # 复用原任务：回置待处理并清掉错误与取消标志（新一次执行的历史在 runs 里可追溯）
@@ -110,6 +111,7 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
 
 async def _recreate_and_run(task_id: int, goal: str) -> None:
     # 简化重试：直接按原目标重新规划执行（沿用同一任务行）
+    import time as _t
     conn = connect()
     try:
         intent = orchestrator.classify(goal)

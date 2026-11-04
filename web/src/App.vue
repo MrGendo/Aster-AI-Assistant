@@ -14,6 +14,14 @@ const detail = ref(null);
 const runningTask = ref(null);
 // 首页对话式回显：提交后就地展示执行状态与最终回答（PRD §10.4/§10.3）
 const activeTask = ref(null);
+// 历史就地展开（不跳任务中心）
+const expandedId = ref(null);
+const histDetail = ref(null);
+async function toggleHistory(tid) {
+  if (expandedId.value === tid) { expandedId.value = null; return; }
+  expandedId.value = tid;
+  histDetail.value = await api(`/tasks/${tid}`);
+}
 const newMem = ref({ scope: "preference", content: "" });
 // Stage 2：发现与评估
 const cands = ref([]);
@@ -51,9 +59,13 @@ async function refresh() {
 // 审批：任务详情内联批准并自动重试（此前藏在设置页，用户找不到——实测反馈）
 function approvalsFor(tid) { return pendingApprovals.value.filter((a) => a.task_id === tid); }
 async function approveAndRetry(aid, tid) {
-  await api(`/approvals/${aid}/decide`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
+  const r = await api(`/approvals/${aid}/decide`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
+  if (r.error) return alert(r.error);
   await refresh();
   await retryTask(tid);
+  // 重试后继续跟踪该任务，首页当前卡实时刷新
+  activeTask.value = { id: tid, goal: activeTask.value?.goal || "", status: "pending" };
+  watchTask(tid);
 }
 async function rejectApproval(aid) {
   await api(`/approvals/${aid}/decide`, { method: "POST", body: JSON.stringify({ decision: "rejected" }) });
@@ -159,7 +171,7 @@ onMounted(() => {
     <nav class="side">
       <div class="brand">Aster</div>
       <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]":key="t[0]"
-              :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}<span v-if="t[0] === 'settings' && pendingApprovals.length" class="badge">{{ pendingApprovals.length }}</span></button>
+              :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
       <div v-if="sys" class="side-status" :class="{ warn: sys.paused }">
         {{ sys.paused ? "已暂停" : sys.provider_ready ? "运行中" : "模型未配置" }}
         <span v-if="pendingApprovals.length" class="badge">{{ pendingApprovals.length }} 待审批</span>
@@ -167,7 +179,7 @@ onMounted(() => {
     </nav>
 
     <main>
-      <!-- 首页：围绕“我要做什么”（PRD §10.3），不放技术细节 -->
+      <!-- 首页 = 主战场：输入 → 执行流程 → 审批 → 结果，一条流全在这（用户实测反馈重构） -->
       <section v-if="tab === 'home'">
         <h1>今天要做点什么？</h1>
         <textarea v-model="goalText" rows="3" placeholder="描述你的目标，或直接粘贴 GitHub 仓库链接…"
@@ -176,20 +188,32 @@ onMounted(() => {
           <button class="primary" @click="submitGoal">开始任务</button>
           <span class="hint">⌘/Ctrl + Enter 发送</span>
         </div>
+
+        <!-- 当前任务：流程/审批/结果都在这张卡，不跳转任何页面 -->
         <div v-if="activeTask" class="card answer">
           <div class="row spread">
             <span class="st" :class="activeTask.status">{{ STATUS_TEXT[activeTask.status] || activeTask.status }}</span>
             <button class="ghost" @click="activeTask = null">收起</button>
           </div>
-          <!-- 运行中：状态与步骤实时可见（PRD §10.4） -->
-          <div v-if="!isTerminal(activeTask.status)" class="running-note">
-            正在处理你的请求…（当前状态：{{ STATUS_TEXT[activeTask.status] || activeTask.status }}）
-            <div v-for="s in activeTask.steps || []" :key="s.id" class="step">
-              步骤 {{ s.seq }}：{{ s.step_desc }} — {{ s.status }}
+          <p class="goal-full">{{ activeTask.goal }}</p>
+          <!-- 步骤时间线：运行中实时刷（PRD §10.4） -->
+          <div v-for="s in activeTask.steps || []" :key="s.id" class="step"
+               :class="{ running: s.status === 'running' }">
+            {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : '·' }}
+            步骤 {{ s.seq }}：{{ s.step_desc }}{{ s.status === 'running' ? '（进行中）' : '' }}
+          </div>
+          <!-- 审批就在这里：批准并自动续跑（不再去设置页找） -->
+          <div v-if="activeTask.status === 'awaiting_user'" class="approval-box">
+            <div v-for="a in approvalsFor(activeTask.id)" :key="a.id" class="row spread approval">
+              <span>{{ a.reason }}</span>
+              <span>
+                <button class="primary" @click="approveAndRetry(a.id, activeTask.id)">批准并继续</button>
+                <button @click="rejectApproval(a.id)">拒绝</button>
+              </span>
             </div>
           </div>
-          <!-- 完成：热点类结果渲染为 AIHOT 风格事件卡榜单，其余走文本 -->
-          <div v-else-if="activeTask.result_detail?.top_items" class="hotboard">
+          <!-- 结果：热点类渲染事件卡榜单，其余文本 -->
+          <div v-if="isTerminal(activeTask.status) && activeTask.result_detail?.top_items" class="hotboard">
             <div v-for="(it, i) in activeTask.result_detail.top_items" :key="i" class="hotcard">
               <span class="rank" :class="'r' + (i + 1)">{{ i + 1 }}</span>
               <div class="hotbody">
@@ -206,16 +230,38 @@ onMounted(() => {
             </div>
             <p class="hint">输入 {{ activeTask.result_detail.total_input }} 条 · 聚合去重 {{ activeTask.result_detail.removed_duplicates }} 条同题报道</p>
           </div>
-          <pre v-else-if="activeTask.result_summary" class="result">{{ activeTask.result_summary }}</pre>
-          <pre v-else-if="activeTask.error" class="result err">{{ activeTask.error }}</pre>
-          <button v-if="isTerminal(activeTask.status)" class="ghost"
-                  @click="openDetail(activeTask.id); tab = 'tasks'">查看完整过程 →</button>
+          <pre v-else-if="isTerminal(activeTask.status) && activeTask.result_summary" class="result">{{ activeTask.result_summary }}</pre>
+          <pre v-else-if="isTerminal(activeTask.status) && activeTask.error" class="result err">{{ activeTask.error }}</pre>
+          <div v-if="['failed', 'cancelled', 'partial'].includes(activeTask.status)" class="row">
+            <button @click="retryTask(activeTask.id); watchTask(activeTask.id)">重试</button>
+          </div>
         </div>
-        <h2>最近任务</h2>
-        <div v-for="t in homeRecent" :key="t.id" class="card task-row" @click="openDetail(t.id); tab = 'tasks'">
-          <span class="st" :class="t.status">{{ STATUS_TEXT[t.status] || t.status }}</span>
-          <span class="goal">{{ t.goal.slice(0, 60) }}</span>
-        </div>
+
+        <!-- 历史：就地展开完整卡，不跳任务中心 -->
+        <h2>历史任务</h2>
+        <template v-for="t in homeRecent" :key="t.id">
+          <div class="card task-row" @click="toggleHistory(t.id)">
+            <span class="st" :class="t.status">{{ STATUS_TEXT[t.status] || t.status }}</span>
+            <span class="goal">{{ t.goal.slice(0, 60) }}</span>
+            <span class="time">{{ new Date(t.created_at * 1000).toLocaleTimeString() }}</span>
+          </div>
+          <div v-if="expandedId === t.id && histDetail" class="card">
+            <div v-for="s in histDetail.steps || []" :key="s.id" class="step">
+              {{ s.status === 'done' ? '✓' : s.status === 'failed' ? '✗' : '·' }} 步骤 {{ s.seq }}：{{ s.step_desc }}
+            </div>
+            <div v-if="histDetail.status === 'awaiting_user'" class="approval-box">
+              <div v-for="a in approvalsFor(t.id)" :key="a.id" class="row spread approval">
+                <span>{{ a.reason }}</span>
+                <span>
+                  <button class="primary" @click="approveAndRetry(a.id, t.id)">批准并继续</button>
+                  <button @click="rejectApproval(a.id)">拒绝</button>
+                </span>
+              </div>
+            </div>
+            <pre v-if="histDetail.result_summary" class="result">{{ histDetail.result_summary }}</pre>
+            <pre v-else-if="histDetail.error" class="result err">{{ histDetail.error }}</pre>
+          </div>
+        </template>
         <p v-if="!homeRecent.length" class="empty">还没有任务。粘贴一个仓库链接试试，例如 https://github.com/asg017/sqlite-vec</p>
       </section>
 
@@ -369,17 +415,6 @@ onMounted(() => {
           </p>
         </div>
 
-        <div class="card" v-if="pendingApprovals.length">
-          <b>待审批</b>
-          <div v-for="a in pendingApprovals" :key="a.id" class="row spread approval">
-            <span>{{ a.reason }}（任务 #{{ a.task_id }}）</span>
-            <span>
-              <button class="primary" @click="decideApproval(a.id, 'approved')">批准</button>
-              <button @click="decideApproval(a.id, 'rejected')">拒绝</button>
-            </span>
-          </div>
-        </div>
-
         <div class="card">
           <b>记忆（用户可查看、修改、删除）</b>
           <div class="row">
@@ -463,4 +498,10 @@ a.hottitle:hover { color: var(--accent); }
 .hotorig { font-size: 12px; color: var(--dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hotsum { font-size: 13px; margin-top: 4px; opacity: .85; }
 .approval span { font-size: 13px; }
+</style>
+<style scoped>
+/* 审批盒与运行步骤的视觉强调（首页主流程用） */
+.approval-box { border-left: 3px solid var(--warn); padding: 8px 12px; margin: 8px 0;
+                background: var(--bg); border-radius: 8px; }
+.step.running { color: var(--run); font-weight: 600; }
 </style>
