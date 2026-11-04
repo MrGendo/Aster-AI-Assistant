@@ -24,6 +24,12 @@ function toggleSelect(tid) {
 }
 async function searchTasks() { tasks.value = await api(`/tasks?query=${encodeURIComponent(searchQuery.value.trim())}&limit=100`); }
 async function clearSearch() { searchQuery.value = ""; refresh(); }
+const allSelected = computed(() =>
+  tasks.value.length > 0 && tasks.value.every((t) => selectedIds.value.includes(t.id)));
+function toggleSelectAll() {
+  // 只全选当前列表（搜索过滤后也成立），不做全库操作——误删面可控
+  selectedIds.value = allSelected.value ? [] : tasks.value.map((t) => t.id);
+}
 async function batchDelete() {
   const ids = [...selectedIds.value];
   if (!ids.length || !confirm(`确认删除选中的 ${ids.length} 个任务？（审计记录保留）`)) return;
@@ -311,6 +317,10 @@ onMounted(() => {
           <button class="danger" @click="batchDelete">批量删除</button>
           <button class="ghost" @click="selectedIds = []">取消选择</button>
         </div>
+        <div v-if="tasks.length" class="select-all-row" @click="toggleSelectAll">
+          <input type="checkbox" :checked="allSelected" @click.stop="toggleSelectAll" />
+          <span class="hint">全选当前列表（{{ tasks.length }} 项{{ searchQuery ? " · 搜索结果" : "" }}）</span>
+        </div>
         <template v-for="t in tasks" :key="t.id">
           <div class="card task-row" @click="toggleDetail(t.id)">
             <input type="checkbox" :checked="selectedIds.includes(t.id)"
@@ -573,4 +583,9 @@ button.danger { color: var(--err); }
 .batch-bar { display: flex; align-items: center; gap: 10px; border-color: var(--err);
              font-size: 13px; padding: 8px 14px; }
 .task-row input[type="checkbox"] { width: auto; }
+</style>
+<style scoped>
+.select-all-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+                  cursor: pointer; font-size: 13px; }
+.select-all-row input { width: auto; }
 </style>
