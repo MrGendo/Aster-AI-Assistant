@@ -48,6 +48,17 @@ async function refresh() {
   proposals.value = await api("/proposals");
 }
 
+// 审批：任务详情内联批准并自动重试（此前藏在设置页，用户找不到——实测反馈）
+function approvalsFor(tid) { return pendingApprovals.value.filter((a) => a.task_id === tid); }
+async function approveAndRetry(aid, tid) {
+  await api(`/approvals/${aid}/decide`, { method: "POST", body: JSON.stringify({ decision: "approved" }) });
+  await refresh();
+  await retryTask(tid);
+}
+async function rejectApproval(aid) {
+  await api(`/approvals/${aid}/decide`, { method: "POST", body: JSON.stringify({ decision: "rejected" }) });
+  refresh();
+}
 async function runAnalyze() {
   analyzing.value = true;
   await api("/evolution/analyze", { method: "POST" });
@@ -136,15 +147,19 @@ async function addMemory() {
 async function delMemory(id) { await api(`/memories/${id}`, { method: "DELETE" }); refresh(); }
 
 const homeRecent = computed(() => tasks.value.slice(0, 6));
-onMounted(refresh);
+onMounted(() => {
+  refresh();
+  // 待审批/任务状态自动刷新：否则审批角标不出现，用户只能干等（实测反馈）
+  setInterval(refresh, 5000);
+});
 </script>
 
 <template>
   <div class="shell">
     <nav class="side">
       <div class="brand">Aster</div>
-      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]"
-              :key="t[0]" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
+      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]":key="t[0]"
+              :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}<span v-if="t[0] === 'settings' && pendingApprovals.length" class="badge">{{ pendingApprovals.length }}</span></button>
       <div v-if="sys" class="side-status" :class="{ warn: sys.paused }">
         {{ sys.paused ? "已暂停" : sys.provider_ready ? "运行中" : "模型未配置" }}
         <span v-if="pendingApprovals.length" class="badge">{{ pendingApprovals.length }} 待审批</span>
@@ -229,6 +244,20 @@ onMounted(refresh);
             <span v-if="s.error" class="err">{{ s.error }}</span>
           </div>
           <div v-if="detail.cancel_requested && !isTerminal(detail.status)" class="warn-note">已收到取消请求，将在当前步骤停止后生效</div>
+          <!-- 等待确认：审批按钮就在任务详情里，批准后自动重试（不再要求去设置页找） -->
+          <div v-if="detail.status === 'awaiting_user'" class="approval-box">
+            <b>需要你的确认</b>
+            <div v-for="a in approvalsFor(detail.id)" :key="a.id" class="row spread approval">
+              <span>{{ a.reason }}</span>
+              <span>
+                <button class="primary" @click="approveAndRetry(a.id, detail.id)">批准并继续</button>
+                <button @click="rejectApproval(a.id)">拒绝</button>
+              </span>
+            </div>
+            <p v-if="!approvalsFor(detail.id).length" class="hint">
+              没有待审批项——若此前已拒绝，可修改输入后重试任务。
+            </p>
+          </div>
           <pre v-if="detail.result_summary" class="result">{{ detail.result_summary }}</pre>
           <pre v-if="detail.error" class="result err">{{ detail.error }}</pre>
           <details v-if="detail.result_detail">
