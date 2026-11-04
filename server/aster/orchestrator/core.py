@@ -24,11 +24,24 @@ TEMPLATES = {
     "repo_analysis": "repo_analysis",
     "text_stats": "text_stats",
     "hot_news": "hot_news_digest",
+    "mem0_add": "mem0_memory",
+    "mem0_search": "mem0_memory",
+    "repo_quality": "repo_quality",
+    "browser": "browser_browse",
 }
 
 
 def classify(goal: str) -> str:
     """意图分类：先用确定性规则（快且零成本），LLM 可用且规则未命中时再问模型"""
+    if GITHUB_RE.search(goal) and re.search(r"质量|评分", goal):
+        return "repo_quality"
+    if re.match(r"^(记住|记一下)", goal):
+        return "mem0_add"
+    if re.match(r"^(回忆|你记得|查一下记忆)", goal):
+        return "mem0_search"
+    URL_RE = re.compile(r"https?://\S+")
+    if URL_RE.search(goal) and re.search(r"浏览|打开|截图|看看这个网页", goal):
+        return "browser"
     if GITHUB_RE.search(goal) and re.search(r"摘要|总结|翻译|写成|点评", goal):
         return "planned"  # 复合目标（分析+加工）→ 多步协作路径
     if goal.startswith("规划执行：") or goal.startswith("规划执行:"):
@@ -491,6 +504,19 @@ def _build_payload(intent: str, goal: str) -> dict:
         # 去掉指令词，取余下文本为对象
         text = re.sub(r"^(帮我|请)?(统计|分析)?(一下)?(这段文本|这段话|文本|字数|行数|词频)?[:：，,\s]*", "", goal).strip()
         return {"text": text or goal}
+    if intent == "mem0_add":
+        return {"action": "add", "text": re.sub(r"^(记住|记一下)[:：，,\s]*", "", goal)}
+    if intent == "mem0_search":
+        return {"action": "search",
+                "query": re.sub(r"^(回忆|你记得|查一下记忆)(一下)?[:：，,\s]*", "", goal)}
+    if intent == "repo_quality":
+        return {"repo_url": GITHUB_RE.search(goal).group(0).rstrip("/")}
+    if intent == "browser":
+        url = re.search(r"https?://\S+", goal).group(0)
+        instruction = re.sub(r"https?://\S+", "", goal)
+        instruction = re.sub(r"^(帮我|请)?(用浏览器)?(浏览|打开|看看)(这个)?(网页)?", "",
+                             instruction).strip("，,。:： ")
+        return {"url": url, "instruction": instruction or "读取页面主要内容并总结要点"}
     return {}
 
 
@@ -502,6 +528,13 @@ def _verify(intent: str, output: dict) -> bool:
         return "chars" in output
     if intent == "hot_news":
         return "digest_markdown" in output and "top_items" in output
+    if intent in ("mem0_add", "mem0_search"):
+        return "added" in output or "results" in output
+    if intent == "repo_quality":
+        # Scorecard 未收录（404）也是合格的诚实产出——error 字段本身就是结果
+        return "score" in output or "error" in output
+    if intent == "browser":
+        return "result" in output
     return True
 
 
@@ -510,6 +543,24 @@ def _deliver(intent: str, output: dict) -> str:
     if intent == "hot_news":
         return (f"{output.get('digest_markdown', '')}\n"
                 f"（输入 {output.get('total_input')} 条，去重移除 {output.get('removed_duplicates')} 条同题报道）")
+    if intent == "mem0_add":
+        return f"已记住：{output.get('detail', '入库完成')}"
+    if intent == "mem0_search":
+        hits = output.get("results") or []
+        if not hits:
+            return "语义记忆里没有相关内容"
+        return "召回记忆：\n" + "\n".join(f"- {h['memory']}（相似度 {h.get('score', 0):.2f}）"
+                                        for h in hits[:5])
+    if intent == "repo_quality":
+        if "error" in output:
+            return f"质量评分不可用：{output['error']}"
+        checks = output.get("key_checks") or {}
+        lines = [f"OpenSSF Scorecard 综合分：{output.get('score')}（{output.get('repo')}）"]
+        for k, v in list(checks.items())[:6]:
+            lines.append(f"  {k}: {v['score']}")
+        return "\n".join(lines)
+    if intent == "browser":
+        return f"[浏览器] {output.get('result', '')[:800]}"
     if intent == "repo_analysis":
         v = output.get("verified", {})
         inf = output.get("inferred", {})
