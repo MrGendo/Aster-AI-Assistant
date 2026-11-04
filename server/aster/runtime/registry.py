@@ -38,6 +38,21 @@ BUILTIN = [
         },
     },
     {
+        "name": "repo_quality",
+        "kind": "tool",
+        "risk_level": "L0",
+        "entry": "repo_quality/run.py",
+        "descriptor": {
+            "name": "仓库质量评分（OpenSSF Scorecard）",
+            "purpose": "查询仓库的客观健康度：维护状态/CI 测试/代码评审/安全策略等，0-10 聚合分",
+            "not_for": "主观实用性判断（归 LLM 评估）；未被 Scorecard 收录的小众仓库",
+            "input": "{\"repo_url\": \"https://github.com/...\"}",
+            "output": "score + 关键检查项明细",
+            "cost": "一次只读 API 调用，秒级，免密钥",
+            "limits": "仅白名单主机；数据来自 OpenSSF 定期扫描",
+        },
+    },
+    {
         "name": "web_fetch",
         "kind": "tool",
         "risk_level": "L0",  # 只读 GET；SSRF 防护在 worker 内强制（内网段拒绝+逐跳校验）

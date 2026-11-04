@@ -101,9 +101,19 @@ async def evaluate(conn: sqlite3.Connection, candidate_id: int) -> dict:
     for p in peers:
         facts[p["repo_url"]] = await asyncio.to_thread(_collect_facts, conn, p["repo_url"])
 
-    # 3) LLM 报告（固定模板；无 provider 时降级为"仅事实罗列"）
+    # 3) 客观质量分（OpenSSF Scorecard）并入材料——高质量维度用权威客观数据
+    quality = {"error": "repo_quality 能力不可用"}
+    qcap = registry.get_active(conn, "repo_quality")
+    if qcap:
+        qres = await asyncio.to_thread(
+            runner.run_capability, conn, qcap, None, None,
+            {"repo_url": cand["repo_url"]}, timeout_s=30)
+        quality = qres.output if qres.ok else {"error": qres.error}
+
+    # 4) LLM 报告（固定模板；无 provider 时降级为"仅事实罗列"）
     material = json.dumps({"主角仓": cand["repo_url"], "元数据": meta,
-                           "同类仓": peers, "采集事实": facts}, ensure_ascii=False, indent=1)[:12000]
+                           "同类仓": peers, "客观质量分": quality,
+                           "采集事实": facts}, ensure_ascii=False, indent=1)[:12000]
     if provider.available():
         try:
             raw = provider.chat([{"role": "user", "content": material}],
