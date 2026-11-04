@@ -159,9 +159,9 @@ async def execute(task_id: int) -> None:
             return
 
         payload = _build_payload(intent, task["goal"])
+        # 没有条目 → 尝试用 news_fetch 抓取（两能力串联的最小协作：抓原料→筛选排序）
+        # 用户消息里的方向词（如"ai agent方向的"）作为抓取检索词
         if payload.get("_empty"):
-            # 没有条目 → 尝试用 news_fetch 抓取（两能力串联的最小协作：抓原料→筛选排序）
-            # 用户消息里的方向词（如"ai agent方向的"）作为抓取检索词
             fetch_cap = registry.get_active(conn, "news_fetch")
             if not fetch_cap:
                 _fail(conn, task_id,
@@ -208,6 +208,10 @@ async def execute(task_id: int) -> None:
         result = await asyncio.to_thread(
             runner.run_capability, conn, cap, task_id, step["id"], payload
         )
+        # 结果落盘路径回填任务，详情页/答案卡可加载完整 JSON（事件卡渲染依赖它）
+        with tx(conn):
+            conn.execute("UPDATE tasks SET result_ref=?, updated_at=? WHERE id=?",
+                         (result.output_path or None, int(time.time()), task_id))
 
         # 步骤收尾：被网关拦截（待审批/拒绝）→ 等待用户或失败，不自动重试
         with tx(conn):
@@ -223,7 +227,8 @@ async def execute(task_id: int) -> None:
             _set_status(conn, task_id, tsm.VERIFYING)
             if ok_verify:
                 summary = _deliver(intent, result.output)
-                _finish(conn, task_id, summary=summary, ref=str(result.output.get("_output_path", "")))
+                # ref 用 runner 的真实落盘路径（_finish 不能再用旧空值覆盖掉它）
+                _finish(conn, task_id, summary=summary, ref=result.output_path or "")
             else:
                 _fail(conn, task_id, "结果未通过结构校验（关键字段缺失），已保留原始输出供查看")
         elif result.pending_approval:

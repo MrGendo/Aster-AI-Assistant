@@ -23,10 +23,11 @@ EXIT_FAILED = 2
 
 class RunResult:
     def __init__(self, ok: bool, exit_code: int, output: dict, error: str = "", duration_ms: int = 0,
-                 pending_approval: bool = False):
+                 pending_approval: bool = False, output_path: str = ""):
         self.ok, self.exit_code, self.output, self.error = ok, exit_code, output, error
         self.duration_ms = duration_ms
         self.pending_approval = pending_approval  # 网关挂起：任务应转等待用户而非失败
+        self.output_path = output_path  # 结果落盘路径：任务 result_ref 用（详情页可展开）
 
 
 def run_capability(
@@ -136,4 +137,5 @@ def run_capability(
         else:
             error = f"能力 {name} 执行失败（exit={proc.returncode}）"
     log.info("能力 %s 完成 ok=%s duration=%sms", name, ok, duration_ms)
-    return RunResult(ok, proc.returncode, output, error, duration_ms)
+    return RunResult(ok, proc.returncode, output, error, duration_ms,
+                     output_path=str(output_path))

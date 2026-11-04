@@ -159,7 +159,22 @@ onMounted(refresh);
               步骤 {{ s.seq }}：{{ s.step_desc }} — {{ s.status }}
             </div>
           </div>
-          <!-- 完成：答案就地展示，不必再去任务中心翻 -->
+          <!-- 完成：热点类结果渲染为 AIHOT 风格事件卡榜单，其余走文本 -->
+          <div v-else-if="activeTask.result_detail?.top_items" class="hotboard">
+            <div v-for="(it, i) in activeTask.result_detail.top_items" :key="i" class="hotcard">
+              <span class="rank" :class="'r' + (i + 1)">{{ i + 1 }}</span>
+              <div class="hotbody">
+                <a v-if="it.url" :href="it.url" target="_blank" class="hottitle">{{ it.title }}</a>
+                <span v-else class="hottitle">{{ it.title }}</span>
+                <div class="hotmeta">
+                  <span class="tag">{{ it.category }}</span>
+                  <span>{{ it.source }}</span>
+                  <span class="heat">热度 {{ it.weighted_score }}</span>
+                </div>
+              </div>
+            </div>
+            <p class="hint">输入 {{ activeTask.result_detail.total_input }} 条 · 聚合去重 {{ activeTask.result_detail.removed_duplicates }} 条同题报道</p>
+          </div>
           <pre v-else-if="activeTask.result_summary" class="result">{{ activeTask.result_summary }}</pre>
           <pre v-else-if="activeTask.error" class="result err">{{ activeTask.error }}</pre>
           <button v-if="isTerminal(activeTask.status)" class="ghost"
@@ -354,5 +369,17 @@ button.ghost { border-color: transparent; color: var(--dim); }
 .empty { color: var(--dim); }
 .detail { margin-top: 14px; }
 .mem .tag { background: var(--bg); border-radius: 6px; padding: 0 6px; font-size: 12px; color: var(--dim); }
+/* AIHOT 风格事件卡榜单 */
+.hotboard { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.hotcard { display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px;
+           background: var(--bg); border-radius: 10px; }
+.rank { min-width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center;
+        justify-content: center; font-weight: 700; font-size: 13px; background: var(--line); color: var(--dim); }
+.rank.r1 { background: #fde2e2; color: #c53030; } .rank.r2 { background: #fff3d6; color: #b7791f; }
+.rank.r3 { background: #e6ffed; color: #2f855a; }
+.hottitle { font-weight: 600; color: var(--text); text-decoration: none; }
+a.hottitle:hover { color: var(--accent); }
+.hotmeta { display: flex; gap: 10px; font-size: 12px; color: var(--dim); margin-top: 3px; align-items: center; }
+.heat { color: var(--warn); }
 .approval span { font-size: 13px; }
 </style>
