@@ -14,8 +14,23 @@ const detail = ref(null);
 const runningTask = ref(null);
 // 首页对话式回显：提交后就地展示执行状态与最终回答（PRD §10.4/§10.3）
 const activeTask = ref(null);
-// 任务中心就地展开 + 行内管理
+// 任务中心就地展开 + 行内管理 + 搜索/批量
 const detailId = ref(null);
+const searchQuery = ref("");
+const selectedIds = ref([]);
+function toggleSelect(tid) {
+  selectedIds.value = selectedIds.value.includes(tid)
+    ? selectedIds.value.filter((x) => x !== tid) : [...selectedIds.value, tid];
+}
+async function searchTasks() { tasks.value = await api(`/tasks?query=${encodeURIComponent(searchQuery.value.trim())}&limit=100`); }
+async function clearSearch() { searchQuery.value = ""; refresh(); }
+async function batchDelete() {
+  const ids = [...selectedIds.value];
+  if (!ids.length || !confirm(`确认删除选中的 ${ids.length} 个任务？（审计记录保留）`)) return;
+  await api("/tasks/batch_delete", { method: "POST", body: JSON.stringify({ ids }) });
+  selectedIds.value = [];
+  refresh();
+}
 async function toggleDetail(tid) {
   if (detailId.value === tid) { detailId.value = null; return; }
   detailId.value = tid;
@@ -280,11 +295,26 @@ onMounted(() => {
         <p v-if="!homeRecent.length" class="empty">还没有任务。粘贴一个仓库链接试试，例如 https://github.com/asg017/sqlite-vec</p>
       </section>
 
-      <!-- 任务中心：行内管理（就地展开，不再把详情甩到列表末尾） -->
+      <!-- 任务中心：搜索 + 多选批量 + 行内管理 -->
       <section v-if="tab === 'tasks'">
-        <h1>任务中心</h1>
+        <div class="row spread">
+          <h1>任务中心</h1>
+          <div class="row" style="margin:0">
+            <input v-model="searchQuery" style="width:220px" placeholder="关键词搜索目标/结果/错误"
+                   @keydown.enter="searchTasks" />
+            <button @click="searchTasks">搜索</button>
+            <button v-if="searchQuery" class="ghost" @click="clearSearch">清空</button>
+          </div>
+        </div>
+        <div v-if="selectedIds.length" class="card batch-bar">
+          已选 {{ selectedIds.length }} 项
+          <button class="danger" @click="batchDelete">批量删除</button>
+          <button class="ghost" @click="selectedIds = []">取消选择</button>
+        </div>
         <template v-for="t in tasks" :key="t.id">
           <div class="card task-row" @click="toggleDetail(t.id)">
+            <input type="checkbox" :checked="selectedIds.includes(t.id)"
+                   @click.stop="toggleSelect(t.id)" />
             <span class="st" :class="t.status">{{ STATUS_TEXT[t.status] || t.status }}</span>
             <span class="goal">{{ t.goal.slice(0, 70) }}</span>
             <span class="time">{{ new Date(t.created_at * 1000).toLocaleString() }}</span>
@@ -538,4 +568,9 @@ a.hottitle:hover { color: var(--accent); }
 .answer-panel .result { border-radius: 0; margin: 0; }
 .row-actions button { padding: 2px 8px; font-size: 12px; }
 button.danger { color: var(--err); }
+</style>
+<style scoped>
+.batch-bar { display: flex; align-items: center; gap: 10px; border-color: var(--err);
+             font-size: 13px; padding: 8px 14px; }
+.task-row input[type="checkbox"] { width: auto; }
 </style>

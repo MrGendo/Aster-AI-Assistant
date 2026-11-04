@@ -32,22 +32,21 @@ async def _run_task(task_id: int) -> None:
 
 
 @router.get("/tasks")
-def list_tasks(status: str | None = None, limit: int = 50) -> list[dict]:
+def list_tasks(status: str | None = None, query: str | None = None, limit: int = 50) -> list[dict]:
+    """列表：可按状态过滤、按关键词搜目标/结果/错误文本"""
     conn = connect()
     try:
+        sql = ("SELECT id, goal, intent, status, cancel_requested, result_summary, error, "
+               "created_at, updated_at FROM tasks WHERE 1=1")
+        args: list = []
         if status:
-            rows = conn.execute(
-                "SELECT id, goal, intent, status, cancel_requested, result_summary, error, "
-                "created_at, updated_at FROM tasks WHERE status=? ORDER BY id DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, goal, intent, status, cancel_requested, result_summary, error, "
-                "created_at, updated_at FROM tasks ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+            sql += " AND status=?"; args.append(status)
+        if query:
+            sql += " AND (goal LIKE ? OR result_summary LIKE ? OR error LIKE ?)"
+            args += [f"%{query}%"] * 3
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
     finally:
         conn.close()
 
@@ -128,24 +127,48 @@ async def _recreate_and_run(task_id: int, goal: str) -> None:
     await orchestrator.execute(task_id)
 
 
+def _delete_one(conn, task_id: int) -> None:
+    """单任务删除内核（单删/批删共用）：审计行保留，任务/步骤引用置空解除外键"""
+    row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, f"任务 {task_id} 不存在")
+    if row["status"] in ("executing", "planning", "verifying"):
+        raise HTTPException(409, f"任务 {task_id} 运行中，请先取消再删除")
+    with conn:
+        # 注意 runs.step_id 也引用 task_steps——漏掉它会 FK 失败（实测教训）
+        conn.execute("UPDATE runs SET task_id=NULL, step_id=NULL WHERE task_id=?", (task_id,))
+        conn.execute("UPDATE tool_calls SET task_id=NULL WHERE task_id=?", (task_id,))
+        conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
+        conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
+
 @router.delete("/tasks/{task_id}")
 def delete_task(task_id: int) -> dict:
-    """删除任务与步骤；runs/tool_calls 审计保留（PRD §12.5 可追溯性优先于整洁）"""
     conn = connect()
     try:
-        row = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "任务不存在")
-        if row["status"] in ("executing", "planning", "verifying"):
-            raise HTTPException(409, "运行中的任务请先取消再删除")
-        with conn:
-            # 审计策略：runs/tool_calls 保留（能力级记录可追溯），任务/步骤引用置空解除外键
-            # 注意 runs.step_id 也引用 task_steps——漏掉它会 FK 失败（实测教训）
-            conn.execute("UPDATE runs SET task_id=NULL, step_id=NULL WHERE task_id=?", (task_id,))
-            conn.execute("UPDATE tool_calls SET task_id=NULL WHERE task_id=?", (task_id,))
-            conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
-            conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        _delete_one(conn, task_id)
         return {"ok": True}
+    finally:
+        conn.close()
+
+
+@router.post("/tasks/batch_delete")
+def batch_delete(body: dict) -> dict:
+    """批量删除：逐个走同一校验（运行中拒绝），单条失败不影响其余，返回逐项结果"""
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids or len(ids) > 200:
+        raise HTTPException(422, "ids 需为非空数组（≤200）")
+    conn = connect()
+    results = []
+    try:
+        for tid in ids:
+            try:
+                _delete_one(conn, int(tid))
+                results.append({"id": tid, "ok": True})
+            except HTTPException as e:
+                results.append({"id": tid, "ok": False, "error": e.detail})
+        ok_n = sum(1 for r in results if r["ok"])
+        return {"ok": True, "deleted": ok_n, "failed": len(results) - ok_n, "detail": results}
     finally:
         conn.close()
 
