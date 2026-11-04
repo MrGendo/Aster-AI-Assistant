@@ -38,6 +38,21 @@ BUILTIN = [
         },
     },
     {
+        "name": "mem0_memory",
+        "kind": "task",
+        "risk_level": "L0",  # 本地存储 + 与对话同源的 GLM 调用
+        "entry": "mem0_memory/run.py",
+        "descriptor": {
+            "name": "语义记忆（mem0）",
+            "purpose": "自然语言读写长期语义记忆：自动提取事实入库、按语义相似度检索（替代关键词 LIKE）",
+            "not_for": "需要精确匹配/结构化过滤的记忆操作（走内置 memories 表）",
+            "input": "{\"action\": \"add|search\", \"text\"|\"query\": \"...\"}",
+            "output": "add 确认 / search 命中记忆列表（含相似度）",
+            "cost": "add 一次 LLM 提取；search 本地向量查询秒级",
+            "limits": "chroma 本地库（data/mem0_store）；嵌入为本地 bge-small-zh",
+        },
+    },
+    {
         "name": "repo_quality",
         "kind": "tool",
         "risk_level": "L0",
