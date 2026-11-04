@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+anthropic
+keyring
+httpx
+jieba
+pytest
+pytest-asyncio
