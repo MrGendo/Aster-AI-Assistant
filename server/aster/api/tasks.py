@@ -194,6 +194,33 @@ def patch_task(task_id: int, body: dict) -> dict:
         conn.close()
 
 
+@router.get("/steps/{step_id}/io")
+def step_io(step_id: int) -> dict:
+    """步骤级输入输出明细（trace 视图数据源）：输入取 input_json，输出读落盘文件前 2000 字"""
+    import json as _json
+    from pathlib import Path
+    conn = connect()
+    try:
+        s = conn.execute("SELECT * FROM task_steps WHERE id=?", (step_id,)).fetchone()
+        if not s:
+            raise HTTPException(404, "步骤不存在")
+        output = ""
+        if s["output_ref"]:
+            try:
+                raw = Path(s["output_ref"]).read_text(encoding="utf-8", errors="ignore")
+                output = raw[:2000]
+            except OSError:
+                # 计划路径的 output_ref 是内联文本而非文件——直接展示本体
+                output = str(s["output_ref"])[:2000]
+        return {
+            "id": s["id"], "seq": s["seq"], "desc": s["step_desc"], "status": s["status"],
+            "input": s["input_json"] or "", "output": output, "error": s["error"],
+            "started_at": s["started_at"], "finished_at": s["finished_at"],
+        }
+    finally:
+        conn.close()
+
+
 @router.get("/tasks/{task_id}/events")
 async def task_events(task_id: int) -> StreamingResponse:
     """SSE：轮询任务行变化推送（Phase 1 轮询够用，后续换事件总线）"""

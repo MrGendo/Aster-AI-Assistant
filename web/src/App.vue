@@ -30,6 +30,14 @@ function toggleSelectAll() {
   // 只全选当前列表（搜索过滤后也成立），不做全库操作——误删面可控
   selectedIds.value = allSelected.value ? [] : tasks.value.map((t) => t.id);
 }
+// 步骤级 trace：点击步骤行就地展开输入/输出（借鉴 agent-prism 的 trace 展示概念）
+const openStep = ref(null);
+const stepIO = ref(null);
+async function toggleStep(sid) {
+  if (openStep.value === sid) { openStep.value = null; return; }
+  openStep.value = sid;
+  stepIO.value = await api(`/steps/${sid}/io`);
+}
 async function batchDelete() {
   const ids = [...selectedIds.value];
   if (!ids.length || !confirm(`确认删除选中的 ${ids.length} 个任务？（审计记录保留）`)) return;
@@ -340,11 +348,18 @@ onMounted(() => {
               <button class="ghost" @click="detailId = null">收起</button>
             </div>
             <p class="goal-full">{{ detail.goal }}</p>
-            <div v-for="s in detail.steps" :key="s.id" class="step"
-                 :class="{ running: s.status === 'running' }">
+            <div v-for="s in detail.steps" :key="s.id" class="step trace-step"
+                 :class="{ running: s.status === 'running' }" @click="toggleStep(s.id)">
               {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : '·' }}
               步骤 {{ s.seq }}：{{ s.step_desc }}
+              <span class="hint">（点击查看输入输出）</span>
               <span v-if="s.error" class="err">{{ s.error }}</span>
+              <div v-if="openStep === s.id && stepIO" class="io-box" @click.stop>
+                <b>输入</b>
+                <pre class="result">{{ stepIO.input || "（无）" }}</pre>
+                <b>输出</b>
+                <pre class="result">{{ stepIO.output || stepIO.error || "（无）" }}</pre>
+              </div>
             </div>
             <div v-if="detail.cancel_requested && !isTerminal(detail.status)" class="warn-note">已收到取消请求，将在当前步骤停止后生效</div>
             <div v-if="detail.status === 'awaiting_user'" class="approval-box">
@@ -588,4 +603,10 @@ button.danger { color: var(--err); }
 .select-all-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px;
                   cursor: pointer; font-size: 13px; }
 .select-all-row input { width: auto; }
+</style>
+<style scoped>
+.trace-step { cursor: pointer; padding: 2px 4px; border-radius: 6px; }
+.trace-step:hover { background: var(--bg); }
+.io-box { margin: 6px 0 4px 18px; }
+.io-box b { font-size: 12px; color: var(--dim); }
 </style>
