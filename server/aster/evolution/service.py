@@ -140,24 +140,34 @@ def rollback(conn: sqlite3.Connection, proposal_id: int) -> dict:
     return {"ok": True, "restored": list(snapshot)}
 
 
-def run_replay(conn: sqlite3.Connection, proposal_id: int | None) -> dict:
-    """回放实验：对回放集逐条执行并记录结果（A/B 对比的 B 侧由 apply 后再跑一次本函数）。
-    注意：会真实调用 LLM/能力，费用敏感——由用户在 UI/确认后触发。"""
+async def run_replay(conn: sqlite3.Connection, proposal_id: int | None) -> dict:
+    """回放实验 v2：对回放集逐条真实执行（走完整任务通道），记录结果供 A/B 对比。
+    注意：真实调用 LLM/能力，费用敏感——由用户确认后触发。"""
+    from ..orchestrator import core as orch
+
     rows = conn.execute("SELECT * FROM replay_set").fetchall()
     results = {}
     for r in rows:
-        # 复用既有任务通道：直接登记为 chat/模板任务由主流程执行的最小近似——
-        # v1 简化为记录当前产出快照（正式 A/B 在 apply 前后各跑一次对比）
-        results[r["name"]] = {"goal": r["task_goal"], "ran_at": int(time.time())}
+        task_id = orch.create_task(conn, r["task_goal"])
+        await orch.execute(task_id)
+        t = conn.execute("SELECT status, result_summary, error FROM tasks WHERE id=?",
+                         (task_id,)).fetchone()
+        results[r["name"]] = {
+            "goal": r["task_goal"], "task_id": task_id, "status": t["status"],
+            "summary_head": (t["result_summary"] or t["error"] or "")[:120],
+            "is_control": bool(r["is_control"]),
+        }
         with tx(conn):
             conn.execute("UPDATE replay_set SET last_result_json=? WHERE id=?",
-                         (json.dumps({"ran_at": results[r["name"]]["ran_at"]},
-                                     ensure_ascii=False), r["id"]))
+                         (json.dumps(results[r["name"]], ensure_ascii=False), r["id"]))
+    ok_n = sum(1 for v in results.values() if v["status"] == "completed")
     if proposal_id:
         with tx(conn):
             conn.execute(
                 "UPDATE improvement_proposals SET status='experimented', "
                 "experiment_result_json=? WHERE id=?",
-                (json.dumps(results, ensure_ascii=False), proposal_id),
+                (json.dumps({"pass_rate": f"{ok_n}/{len(results)}", "detail": results},
+                            ensure_ascii=False), proposal_id),
             )
-    return {"ok": True, "replayed": len(results), "note": "回放执行完成（对照集含在内）"}
+    return {"ok": True, "replayed": len(results), "pass_rate": f"{ok_n}/{len(results)}",
+            "detail": results}

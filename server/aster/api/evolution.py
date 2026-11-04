@@ -30,11 +30,11 @@ def proposals() -> list[dict]:
 
 
 @router.post("/proposals/{pid}/experiment")
-def experiment(pid: int) -> dict:
-    """回放实验（会产生真实能力/LLM 调用，费用敏感）"""
+async def experiment(pid: int) -> dict:
+    """回放实验 v2：真实执行回放集（会产生能力/LLM 调用）"""
     conn = connect()
     try:
-        return evo.run_replay(conn, pid)
+        return await evo.run_replay(conn, pid)
     finally:
         conn.close()
 

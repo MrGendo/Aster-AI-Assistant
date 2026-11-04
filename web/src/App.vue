@@ -20,6 +20,9 @@ const cands = ref([]);
 const candUrl = ref("");
 const report = ref(null);
 const draft = ref(null);
+// Stage 4：成长与进化
+const proposals = ref([]);
+const analyzing = ref(false);
 
 const STATUS_TEXT = {
   pending: "待处理", planning: "规划中", executing: "执行中", awaiting_user: "等待确认",
@@ -42,7 +45,18 @@ async function refresh() {
   pendingApprovals.value = await api("/approvals?status=pending");
   sys.value = await api("/system/status");
   cands.value = await api("/candidates");
+  proposals.value = await api("/proposals");
 }
+
+async function runAnalyze() {
+  analyzing.value = true;
+  await api("/evolution/analyze", { method: "POST" });
+  proposals.value = await api("/proposals");
+  analyzing.value = false;
+}
+async function runExperiment(id) { await api(`/proposals/${id}/experiment`, { method: "POST" }); proposals.value = await api("/proposals"); }
+async function applyProposal(id) { await api(`/proposals/${id}/apply`, { method: "POST", body: JSON.stringify({}) }); proposals.value = await api("/proposals"); }
+async function rollbackProposal(id) { await api(`/proposals/${id}/rollback`, { method: "POST" }); proposals.value = await api("/proposals"); }
 
 // Stage 2：候选评估流
 const LIFECYCLE_TEXT = {
@@ -129,7 +143,7 @@ onMounted(refresh);
   <div class="shell">
     <nav class="side">
       <div class="brand">Aster</div>
-      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['settings','设置']]"
+      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]"
               :key="t[0]" :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
       <div v-if="sys" class="side-status" :class="{ warn: sys.paused }">
         {{ sys.paused ? "已暂停" : sys.provider_ready ? "运行中" : "模型未配置" }}
@@ -277,6 +291,40 @@ onMounted(refresh);
           <div class="row spread"><b>适配草稿（须人工审阅后才可隔离测试）</b><button class="ghost" @click="draft = null">关闭</button></div>
           <pre class="result">{{ draft.script }}</pre>
         </div>
+      </section>
+
+      <!-- 成长与进化：让用户看懂系统为什么变、变了什么、是否更好（PRD §14.2） -->
+      <section v-if="tab === 'evo'">
+        <div class="row spread">
+          <h1>成长与进化</h1>
+          <button class="primary" :disabled="analyzing" @click="runAnalyze">
+            {{ analyzing ? "分析中…" : "分析运行瓶颈" }}
+          </button>
+        </div>
+        <p class="hint">系统从真实运行数据发现瓶颈并提改进方案；任何变更都可回滚，高风险永不自动应用。</p>
+        <div v-for="p in proposals" :key="p.id" class="card">
+          <div class="row spread">
+            <div>
+              <b>提案 #{{ p.id }}</b>
+              <span class="tag">{{ { draft: "草稿", experimented: "已实验", applied: "已应用", rolled_back: "已回滚", rejected: "已拒绝" }[p.status] || p.status }}</span>
+              <span class="tag" :class="p.risk === 'high' ? 'err' : ''">{{ p.risk }} 风险</span>
+            </div>
+            <div>
+              <button v-if="p.status === 'draft'" @click="runExperiment(p.id)">回放实验</button>
+              <button v-if="['draft', 'experimented'].includes(p.status)" class="primary" @click="applyProposal(p.id)">应用</button>
+              <button v-if="p.status === 'applied'" @click="rollbackProposal(p.id)">回滚</button>
+            </div>
+          </div>
+          <p>{{ p.hypothesis }}</p>
+          <details>
+            <summary>证据 · 变更 · 冻结验收标准</summary>
+            <p class="meta">证据：{{ p.evidence_json }}</p>
+            <p class="meta">变更：{{ p.change_json }}</p>
+            <p class="meta">验收标准（冻结，仅人工可改）：{{ p.acceptance_frozen }}</p>
+            <pre v-if="p.experiment_result_json" class="result">{{ p.experiment_result_json }}</pre>
+          </details>
+        </div>
+        <p v-if="!proposals.length" class="empty">暂无提案——点右上「分析运行瓶颈」，系统会从能力统计与失败记录里找问题。</p>
       </section>
 
       <!-- 设置 -->
