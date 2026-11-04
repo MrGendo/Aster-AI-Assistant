@@ -22,9 +22,11 @@ EXIT_FAILED = 2
 
 
 class RunResult:
-    def __init__(self, ok: bool, exit_code: int, output: dict, error: str = "", duration_ms: int = 0):
+    def __init__(self, ok: bool, exit_code: int, output: dict, error: str = "", duration_ms: int = 0,
+                 pending_approval: bool = False):
         self.ok, self.exit_code, self.output, self.error = ok, exit_code, output, error
         self.duration_ms = duration_ms
+        self.pending_approval = pending_approval  # 网关挂起：任务应转等待用户而非失败
 
 
 def run_capability(
@@ -45,7 +47,8 @@ def run_capability(
     if verdict == "paused":
         return RunResult(False, 0, {}, "系统处于暂停状态，该能力暂不执行（可在设置中恢复）")
     if verdict == "pending":
-        return RunResult(False, 0, {}, f"能力 {name}（风险 {risk}）需要你的确认，请在待办中批准")
+        return RunResult(False, 0, {}, f"能力 {name}（风险 {risk}）需要你的确认，请在设置页批准后重试任务",
+                         pending_approval=True)
     if verdict == "denied":
         return RunResult(False, 0, {}, f"能力 {name} 的执行已被拒绝或审批超时")
 

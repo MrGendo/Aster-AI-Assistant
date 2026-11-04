@@ -22,6 +22,7 @@ GITHUB_RE = re.compile(r"https?://github\.com/[\w.\-]+/[\w.\-]+/?", re.IGNORECAS
 TEMPLATES = {
     "repo_analysis": "repo_analysis",
     "text_stats": "text_stats",
+    "hot_news": "hot_news_digest",
 }
 
 
@@ -29,6 +30,8 @@ def classify(goal: str) -> str:
     """意图分类：先用确定性规则（快且零成本），LLM 可用且规则未命中时再问模型"""
     if GITHUB_RE.search(goal):
         return "repo_analysis"
+    if re.search(r"热点|日报", goal) and len(goal) > 12:
+        return "hot_news"
     if re.search(r"统计|字数|行数|词频", goal) and len(goal) < 60:
         return "text_stats"
     if provider.available():
@@ -141,6 +144,12 @@ async def execute(task_id: int) -> None:
             return
 
         payload = _build_payload(intent, task["goal"])
+        if payload.get("_empty"):
+            # 诚实失败：没有条目就没有日报，明确告知用户怎么补（PRD：不伪装成功）
+            _fail(conn, task_id,
+                  "没有从你的消息中提取到热点条目。请把新闻条目（标题/来源等）直接粘贴进来，"
+                  "或提供含条目的文本——本能力负责筛选排序，不负责联网抓取。")
+            return
         with tx(conn):
             conn.execute(
                 "UPDATE task_steps SET status='running', input_json=?, started_at=? WHERE id=?",
@@ -167,6 +176,12 @@ async def execute(task_id: int) -> None:
                 _finish(conn, task_id, summary=summary, ref=str(result.output.get("_output_path", "")))
             else:
                 _fail(conn, task_id, "结果未通过结构校验（关键字段缺失），已保留原始输出供查看")
+        elif result.pending_approval:
+            # PRD §4.4：等审批不是失败——任务转"等待用户确认"，批准后重试即可续跑
+            _set_status(conn, task_id, tsm.AWAITING_USER)
+            with tx(conn):
+                conn.execute("UPDATE tasks SET error=?, updated_at=? WHERE id=?",
+                             (result.error, int(time.time()), task_id))
         else:
             _fail(conn, task_id, result.error)
     except Exception as e:
@@ -182,6 +197,23 @@ async def execute(task_id: int) -> None:
 def _build_payload(intent: str, goal: str) -> dict:
     if intent == "repo_analysis":
         return {"repo_url": GITHUB_RE.search(goal).group(0).rstrip("/")}
+    if intent == "hot_news":
+        # 用 LLM 把用户粘贴的热点文本结构化为条目；没有可提取内容则如实失败（不编新闻）
+        body = re.sub(r"^.{0,40}?[:：]", "", goal, count=1).strip() or goal
+        if provider.available():
+            try:
+                raw = provider.chat(
+                    [{"role": "user", "content": body}],
+                    system="从文本中提取新闻/热点条目，输出 JSON：{\"items\":[{\"title\":\"\",\"source\":\"\",\"category\":\"\",\"score\":热度数字0-100,\"age_hours\":发布距今小时数}]}。"
+                           "score/age_hours 缺失时按内容合理估计。若文本中没有任何具体条目，输出 {\"items\":[]}。只输出 JSON。",
+                    max_tokens=1500,
+                )
+                items = json.loads(raw[raw.index("{"): raw.rindex("}") + 1]).get("items", [])
+                if items:
+                    return {"topic": "行业热点", "top_n": 5, "items": items}
+            except Exception as e:
+                log.warning("热点条目结构化失败: %s", e)
+        return {"_empty": True}  # 标记无条目：由执行层给出诚实失败说明
     if intent == "text_stats":
         # 去掉指令词，取余下文本为对象
         text = re.sub(r"^(帮我|请)?(统计|分析)?(一下)?(这段文本|这段话|文本|字数|行数|词频)?[:：，,\s]*", "", goal).strip()
@@ -195,11 +227,16 @@ def _verify(intent: str, output: dict) -> bool:
         return "verified" in output and "inferred" in output
     if intent == "text_stats":
         return "chars" in output
+    if intent == "hot_news":
+        return "digest_markdown" in output and "top_items" in output
     return True
 
 
 def _deliver(intent: str, output: dict) -> str:
     """交付摘要：结果优先、直给结论（PRD §4.5）"""
+    if intent == "hot_news":
+        return (f"{output.get('digest_markdown', '')}\n"
+                f"（输入 {output.get('total_input')} 条，去重移除 {output.get('removed_duplicates')} 条同题报道）")
     if intent == "repo_analysis":
         v = output.get("verified", {})
         inf = output.get("inferred", {})

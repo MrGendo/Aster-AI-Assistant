@@ -27,6 +27,17 @@ def is_paused(conn: sqlite3.Connection) -> bool:
     return _get_setting(conn, "system.paused") == "1"
 
 
+def l1_auto_allowed(conn: sqlite3.Connection, capability: str) -> bool:
+    """L1 逐能力开"自动放行"（spec D6：默认确认，可按能力放开）。
+    只对经人工审阅确认无副作用的能力开启，如纯计算类适配器。"""
+    import json as _json
+    raw = _get_setting(conn, "gateway.l1_auto", "[]")
+    try:
+        return capability in _json.loads(raw)
+    except ValueError:
+        return False
+
+
 def _record_call(conn, task_id, capability, risk, status, args_digest=""):
     """审计落库（append-only），返回 tool_call id"""
     with tx(conn):
@@ -52,7 +63,7 @@ def check(
     - denied：审批已被拒绝或已超时
     - paused：系统处于紧急停止态（L1/L2 挂起，L0 仍放行）
     """
-    if risk == "L0":
+    if risk == "L0" or (risk == "L1" and l1_auto_allowed(conn, capability)):
         _record_call(conn, task_id, capability, risk, "approved_auto", args_digest)
         return "allowed"
 
