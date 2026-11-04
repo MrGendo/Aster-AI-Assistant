@@ -38,6 +38,21 @@ BUILTIN = [
         },
     },
     {
+        "name": "browser_browse",
+        "kind": "task",
+        "risk_level": "L1",  # 可交互（点击/输入），默认需确认；指令固定附加只读约束
+        "entry": "browser_browse/run.py",
+        "descriptor": {
+            "name": "浏览器浏览（browser-use）",
+            "purpose": "读取 JS 渲染的动态页面、需要滚动/点击后才可见的内容，返回结果文本",
+            "not_for": "静态页面（用 web_fetch 更快）、需要登录的操作、批量抓取",
+            "input": "{\"url\": \"...\", \"instruction\": \"要获取什么\", \"max_steps\": 8}",
+            "output": "结果文本（≤4000字）",
+            "cost": "每步一次 LLM 调用 + 无头浏览器，约 10-60 秒/任务",
+            "limits": "步数上限 15；指令固定附加禁止提交表单/登录的只读约束",
+        },
+    },
+    {
         "name": "mem0_memory",
         "kind": "task",
         "risk_level": "L0",  # 本地存储 + 与对话同源的 GLM 调用
