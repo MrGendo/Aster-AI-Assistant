@@ -6,8 +6,8 @@
 
 ## 任务清单
 
-- [ ] 3-0 迁移 0003（task_steps 加 output_key/depends_on；capability_stats）+ 步骤 DAG 合法性校验单测（环/引用/active 检查）
-- [ ] 3-1 规划器：LLM 产出计划 JSON + 硬校验 + 模板回退（现有三条模板路径保留为回退）
+- [x] 3-0 迁移 0003 + DAG 校验单测 4 项（非法能力/坏引用/前向引用/超限与缺标准全被拒），22\/22 过
+- [x] 3-1 规划器 + 硬校验 + 模板回退（计划路径实测 completed；chat 回退分支未自然触发，代码在）
 - [ ] 3-2 执行器 v1：拓扑序执行 + "$stepN.key" 占位符数据流 + 步数/总超时上限 + awaiting_user 语义
 - [ ] 3-3 失败接管：步骤级 fallback 链 + 降级审计记录
 - [ ] 3-4 评审步：LLM verify（pass/fail+理由）接入验证态
