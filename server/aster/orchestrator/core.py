@@ -222,6 +222,9 @@ async def execute(task_id: int) -> None:
                  result.error or None, int(time.time()), step["id"]),
             )
         if result.ok:
+            # 热点富化：为榜单条目生成中文标题与摘要（翻译+速览，GLM 原生能力）
+            if intent == "hot_news":
+                result.output = _enrich_hot_news(result.output, result.output_path)
             # Phase 1 验证：结构化输出的关键字段齐全才算过验证（PRD：未验证不显示成功）
             ok_verify = _verify(intent, result.output)
             _set_status(conn, task_id, tsm.VERIFYING)
@@ -354,6 +357,48 @@ async def _execute_planned(conn, task) -> bool | None:
         or last.get("result") or json.dumps(last, ensure_ascii=False)[:600]
     _finish(conn, task["id"], summary=summary)
     return True
+
+
+def _enrich_hot_news(output: dict, output_path: str = "") -> dict:
+    """热点榜单富化：逐条生成中文标题（翻译）+ 一句话摘要（≤60字）。
+    成功后回写落盘文件——详情页/答案卡从文件加载，不回写则 UI 拿不到富化结果。
+    失败静默降级回原始榜单——富化是增强不是前置条件。"""
+    items = output.get("top_items") or []
+    if not items or not provider.available():
+        return output
+    try:
+        raw = provider.chat(
+            [{"role": "user", "content": json.dumps(
+                [{"idx": i, "title": it.get("title", ""), "source": it.get("source", "")}
+                 for i, it in enumerate(items)], ensure_ascii=False)}],
+            system="为每个条目输出 JSON：{\"items\":[{\"idx\":0,\"title_cn\":\"标题的忠实中文翻译\","
+                   "\"summary_cn\":\"基于标题的一句话中文摘要，≤60字，点明它是什么/为什么值得看\"}]}。"
+                   "不要编造标题之外的事实。只输出 JSON。",
+            max_tokens=1200,
+        )
+        enriched = json.loads(raw[raw.index("{"): raw.rindex("}") + 1]).get("items", [])
+        for e in enriched:
+            i = e.get("idx")
+            if isinstance(i, int) and 0 <= i < len(items):
+                if e.get("title_cn"):
+                    items[i]["title_cn"] = e["title_cn"]
+                if e.get("summary_cn"):
+                    items[i]["summary_cn"] = e["summary_cn"]
+        # 榜单 markdown 同步用中文标题重建，保持两处一致
+        lines = [f"# {output.get('topic', '热点')} 日报"]
+        for n, it in enumerate(items, 1):
+            title = it.get("title_cn") or it.get("title", "")
+            extra = f"——{it['summary_cn']}" if it.get("summary_cn") else ""
+            lines.append(f"{n}. {title}（{it.get('source', '')}，热度 {it.get('weighted_score', 0)}）{extra}")
+        output["digest_markdown"] = "\n".join(lines)
+        output["enriched"] = True
+        if output_path:
+            from pathlib import Path
+            Path(output_path).write_text(
+                json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.info("热点富化失败，降级原榜单: %s", e)
+    return output
 
 
 def _llm_task(payload: dict) -> "runner.RunResult":

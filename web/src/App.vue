@@ -164,8 +164,10 @@ onMounted(refresh);
             <div v-for="(it, i) in activeTask.result_detail.top_items" :key="i" class="hotcard">
               <span class="rank" :class="'r' + (i + 1)">{{ i + 1 }}</span>
               <div class="hotbody">
-                <a v-if="it.url" :href="it.url" target="_blank" class="hottitle">{{ it.title }}</a>
-                <span v-else class="hottitle">{{ it.title }}</span>
+                <a v-if="it.url" :href="it.url" target="_blank" class="hottitle">{{ it.title_cn || it.title }}</a>
+                <span v-else class="hottitle">{{ it.title_cn || it.title }}</span>
+                <div v-if="it.title_cn && it.title_cn !== it.title" class="hotorig">{{ it.title }}</div>
+                <div v-if="it.summary_cn" class="hotsum">{{ it.summary_cn }}</div>
                 <div class="hotmeta">
                   <span class="tag">{{ it.category }}</span>
                   <span>{{ it.source }}</span>
@@ -381,5 +383,7 @@ button.ghost { border-color: transparent; color: var(--dim); }
 a.hottitle:hover { color: var(--accent); }
 .hotmeta { display: flex; gap: 10px; font-size: 12px; color: var(--dim); margin-top: 3px; align-items: center; }
 .heat { color: var(--warn); }
+.hotorig { font-size: 12px; color: var(--dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hotsum { font-size: 13px; margin-top: 4px; opacity: .85; }
 .approval span { font-size: 13px; }
 </style>
