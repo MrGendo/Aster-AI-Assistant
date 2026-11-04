@@ -1,5 +1,6 @@
 # 受控进化服务（PRD §9 七步 loop 的 v1：参数级、提案制、可回滚）
 # 两条不变量：验收标准冻结只读（仅人工可改）；高风险变更硬编码不自动应用
+import asyncio
 import json
 import sqlite3
 import time
@@ -161,13 +162,31 @@ async def run_replay(conn: sqlite3.Connection, proposal_id: int | None) -> dict:
             conn.execute("UPDATE replay_set SET last_result_json=? WHERE id=?",
                          (json.dumps(results[r["name"]], ensure_ascii=False), r["id"]))
     ok_n = sum(1 for v in results.values() if v["status"] == "completed")
+    # 质量维度（promptfoo llm-rubric）：完成率之外，输出是否真的切题有料
+    quality = {"quality_pass_rate": "未运行"}
+    gcap = None
+    from ..runtime import registry, runner as _runner
+    try:
+        gcap = registry.get_active(conn, "replay_grade")
+    except Exception:
+        pass
+    if gcap and results:
+        # results 以回放集名字为键——name 取键而非值字段（KeyError 教训）
+        grade_items = [{"name": k, "output": v.get("summary_head", ""),
+                        "criteria": "输出切题且包含具体事实或结果，不是拒绝、报错或空洞回复"}
+                       for k, v in results.items()]
+        gres = await asyncio.to_thread(
+            _runner.run_capability, conn, gcap, None, None, {"items": grade_items},
+            timeout_s=600)
+        if gres.ok:
+            quality = gres.output
     if proposal_id:
         with tx(conn):
             conn.execute(
                 "UPDATE improvement_proposals SET status='experimented', "
                 "experiment_result_json=? WHERE id=?",
-                (json.dumps({"pass_rate": f"{ok_n}/{len(results)}", "detail": results},
-                            ensure_ascii=False), proposal_id),
+                (json.dumps({"pass_rate": f"{ok_n}/{len(results)}", **quality,
+                             "detail": results}, ensure_ascii=False), proposal_id),
             )
     return {"ok": True, "replayed": len(results), "pass_rate": f"{ok_n}/{len(results)}",
-            "detail": results}
+            **quality, "detail": results}

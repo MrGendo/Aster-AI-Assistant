@@ -38,6 +38,21 @@ BUILTIN = [
         },
     },
     {
+        "name": "replay_grade",
+        "kind": "meta",  # 元能力：服务于主板进化的评估环节（PRD §8.2）
+        "risk_level": "L0",  # 本地文件 + GLM 评分调用
+        "entry": "replay_grade/run.py",
+        "descriptor": {
+            "name": "回放质量评分（promptfoo）",
+            "purpose": "按验收标准给回放任务输出打分（llm-rubric），补齐回放实验的质量维度",
+            "not_for": "执行任务本身；需要精确断言的场景（应写死规则而非 LLM 评分）",
+            "input": "{\"items\": [{\"name\", \"output\", \"criteria\"}]}",
+            "output": "逐项 pass/fail + 理由 + 质量通过率",
+            "cost": "每项一次 GLM 评分调用",
+            "limits": "promptfoo 本地安装（tools/pf）；输出截断 800 字",
+        },
+    },
+    {
         "name": "browser_browse",
         "kind": "task",
         "risk_level": "L1",  # 可交互（点击/输入），默认需确认；指令固定附加只读约束
