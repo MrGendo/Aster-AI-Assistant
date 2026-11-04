@@ -15,10 +15,11 @@ from . import lifecycle
 
 log = get_logger("evaluation")
 
-REPORT_TEMPLATE = """你是开源项目评估师。基于给定的事实材料，按以下 JSON 结构输出评估报告（只输出 JSON）：
+REPORT_TEMPLATE = """你是开源项目评估师。评估对象**有且只有一个：材料中的"主角仓"**；"同类仓"与"客观质量分"仅作对照参考，绝不要把同类仓当成评估对象。
+按以下 JSON 结构输出（只输出 JSON）：
 {{
   "dimensions": {{
-    "功能匹配度": "…", "实际效果": "未实测（Phase 2 无实测数据时如实标注）",
+    "功能匹配度": "…", "实际效果": "未实测（无实测数据时如实标注）",
     "主板适配度": "…", "可靠性": "…", "安全性": "…", "维护状况": "…",
     "部署成本": "…", "运行成本": "…", "扩展能力": "…", "使用体验": "…",
     "许可与合规": "…", "未来价值": "…"
@@ -121,7 +122,7 @@ async def evaluate(conn: sqlite3.Connection, candidate_id: int) -> dict:
             report = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
         except (ValueError, Exception) as e:
             log.warning("LLM 报告生成失败，降级事实版: %s", e)
-            report = _facts_only_report(facts, cand["repo_url"])
+            report = _facts_only_report(facts, cand["repo_url"], why=str(e)[:80])
     else:
         report = _facts_only_report(facts, cand["repo_url"])
 
@@ -142,16 +143,16 @@ async def evaluate(conn: sqlite3.Connection, candidate_id: int) -> dict:
     return report
 
 
-def _facts_only_report(facts: dict, main_url: str) -> dict:
-    """无 LLM 时的降级报告：只呈现已采集事实，推荐一律 hold（不假装评估）"""
+def _facts_only_report(facts: dict, main_url: str, why: str = "模型未配置") -> dict:
+    """降级报告：只呈现已采集事实，推荐一律 hold（不假装评估）；如实记录降级原因"""
     verified = []
     for url, f in facts.items():
         for k, v in (f.get("verified") or {}).items():
             verified.append(f"{url}: {k}={v}")
     return {
-        "dimensions": {"说明": "LLM 未配置，以下仅为采集事实，未做综合评估"},
+        "dimensions": {"说明": f"报告生成降级（{why}），以下仅为采集事实"},
         "evidence": {"verified": verified[:20], "inferred": []},
         "recommendation": "hold",
-        "reason": "模型未配置或生成失败，仅提供事实材料，请在配置模型后重新评估",
+        "reason": f"综合评估生成失败（{why}），仅提供事实材料，可重新评估",
         "confidence": 0.3,
     }
