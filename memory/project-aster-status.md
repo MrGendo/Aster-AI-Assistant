@@ -5,7 +5,7 @@ metadata:
   type: project
 ---
 
-Aster 于 2026-11-04 **整体转向**：需求源为 `product_requirement.md`（自进化智能体平台，四阶段）。**Phase 1 主体已完成并端到端跑通**（1-0~1-7 勾选）：FastAPI 主板（server/aster）+ 子进程能力运行时 + SQLite 九表 + Vue3 四页 UI（web/，服务托管于 http://127.0.0.1:8317/）+ 治理网关（L0/L1/L2+审批+审计）+ GLM provider（密钥在 Keychain，自举自 claude CLI）。旗舰能力 repo_analysis 实测通过（**git clone 直连可用**）；15 项单测全过。旧方案归档在 `docs/archive/butler-v1/`。**待办**：Phase 1 已全部收口（1-8 用户走查通过、初始提交 e810738、1-9 复盘完成：6 任务意图分类 6/6、能力运行 3/3 成功）；**Stage 2（开源比较与能力接入）spec/plan 已建于 `docs/superpowers/specs|plans/2026-11-04-aster-stage2-*`，待用户批准执行**——含两个知情确认点：claude headless 生成适配代码的费用（GLM 计划内）、沙箱无网络隔离的诚实边界。
+Aster 于 2026-11-04 **整体转向**：需求源为 `product_requirement.md`（自进化智能体平台，四阶段）。**Phase 1 主体已完成并端到端跑通**（1-0~1-7 勾选）：FastAPI 主板（server/aster）+ 子进程能力运行时 + SQLite 九表 + Vue3 四页 UI（web/，服务托管于 http://127.0.0.1:8317/）+ 治理网关（L0/L1/L2+审批+审计）+ GLM provider（密钥在 Keychain，自举自 claude CLI）。旗舰能力 repo_analysis 实测通过（**git clone 直连可用**）；15 项单测全过。旧方案归档在 `docs/archive/butler-v1/`。**待办**：Phase 1 全收口（提交 e810738）。**Stage 2 主体已交付并部分实测**（提交 efc8675）：2-0~2-3 实测通过（gh 发现/评估流水线两次真跑含同类比较/发现页 UI；18 测试全过），**2-4~2-8（隔离测试/版本回滚/claude 草稿/巡检/经验）代码完成但未经真实流程实测**——下一步要么用户在 UI 走全链路（提交→报告→生成草稿→审阅→设置页审批隔离测试→接入），要么用户指定候选由我代跑；随后收口 2-9 验收。
 
 **Why:** SDD 规约与用户"按新 PRD 重做"指令；形态/归档/GLM 三项均为用户拍板结果。
 

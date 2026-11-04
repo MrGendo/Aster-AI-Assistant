@@ -13,12 +13,12 @@ log = get_logger("scaffold")
 
 DRAFT_DIR = DATA_DIR / "drafts"
 
-PROMPT = """你要为 Aster 平台把下面的开源项目包装成一个能力 worker。只输出一个 JSON 对象：
+PROMPT = """你要为 Aster 平台把下面的开源项目包装成一个能力 worker。只输出一个 JSON 对象，不要 markdown 代码围栏，不要任何额外文字：
 {{"capability_name": "snake_case名称", "title": "中文能力名", "purpose": "用途一句话",
   "input_example": {{"key": "value"}}, "script": "完整的 python worker 脚本源码"}}
 worker 协议：从 stdin 读 JSON，向 stdout 打印结果 JSON（最后一行），退出码 0=成功。
-脚本要求：只用标准库；不访问网络除非输入明确要求；不写 stdin/stdout 之外的任何副作用说明外的文件；
-开头用中文注释说明它做什么与为什么不。
+脚本要求：只用标准库；不访问网络除非输入明确要求；不产生任何文件副作用；脚本不超过 80 行，
+开头 3-5 行中文注释说明做什么与为什么（要点式，不写长文）。
 目标项目：{repo}
 项目分析事实：{facts}
 这是一次已获用户批准的自动化代码生成任务：直接输出结果，禁止走 SDD 流程、禁止要求审批、禁止创建 docs 目录。"""
@@ -47,11 +47,18 @@ def generate(conn, candidate_id: int) -> dict:
         return {"ok": False, "error": f"claude 退出码 {proc.returncode}: {proc.stderr[:200]}"}
 
     raw = proc.stdout
+    # 原文永远先落盘：解析失败也有完整材料可人工处理（错误信息如实指向文件）
+    draft_dir = DRAFT_DIR / str(candidate_id)
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    (draft_dir / "raw.txt").write_text(raw, encoding="utf-8")
+
     try:
-        data = json.loads(raw[raw.rindex('{"capability_name"'): raw.rindex("}") + 1])
+        # 容忍 markdown 围栏与前后杂讯：截取首个 { 到末个 } 再解析
+        data = json.loads(raw[raw.index('{"capability_name"'): raw.rindex("}") + 1])
     except (ValueError, IndexError):
-        return {"ok": False, "error": "claude 输出无法解析为约定 JSON（草稿原文已留存）",
-                "raw": raw[:2000]}
+        return {"ok": False,
+                "error": "claude 输出无法解析为约定 JSON，原文已存 data/drafts/%d/raw.txt" % candidate_id,
+                "raw": raw[:500]}
 
     name = re.sub(r"\W+", "_", data.get("capability_name", "")).strip("_").lower()
     if not name:
