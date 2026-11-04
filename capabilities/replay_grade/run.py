@@ -11,16 +11,6 @@ from pathlib import Path
 
 PF_BIN = Path(__file__).resolve().parents[2] / "tools/pf/node_modules/.bin/promptfoo"
 
-TEMPLATE = """description: aster replay grading
-prompts:
-  - "{{{{output}}}}"
-providers:
-  - id: echo
-tests:
-{tests}
-"""
-
-
 def main() -> int:
     try:
         p = json.loads(sys.stdin.read())
@@ -32,16 +22,26 @@ def main() -> int:
         print(json.dumps({"error": "items 为空"}, ensure_ascii=False))
         return 4
 
-    blocks = []
-    for it in items:
-        out = str(it.get("output", "")).replace('"', '\\"')[:800]
-        crit = str(it.get("criteria", "输出切题且含具体事实，不是拒绝或空洞回复"))[:200]
-        blocks.append(
-            f'  - vars:\n      output: "{out}"\n    assert:\n'
-            f'      - type: llm-rubric\n        value: "{crit}"\n'
-        )
+    # YAML 必须结构化生成——手拼字符串在内容含换行/引号/冒号时必炸（实测教训）
+    import yaml
+    cfg_dict = {
+        "description": "aster replay grading",
+        "prompts": ["{{output}}"],
+        "providers": [{"id": "echo"}],
+        "tests": [
+            {
+                "vars": {"output": str(it.get("output", ""))[:800]},
+                "assert": [{
+                    "type": "llm-rubric",
+                    "value": str(it.get("criteria",
+                                        "输出切题且含具体事实，不是拒绝或空洞回复"))[:200],
+                }],
+            }
+            for it in items
+        ],
+    }
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-        f.write(TEMPLATE.format(tests="".join(blocks)))
+        yaml.safe_dump(cfg_dict, f, allow_unicode=True)
         cfg = f.name
     out_path = cfg.replace(".yaml", ".result.json")
 
@@ -57,8 +57,11 @@ def main() -> int:
              "NO_PROXY": "localhost,127.0.0.1,open.bigmodel.cn"},
     )
     os.unlink(cfg)
-    if proc.returncode != 0 or not Path(out_path).exists():
-        print(json.dumps({"error": f"promptfoo 执行失败: {proc.stderr[-200:]}"},
+    # 注意：promptfoo 退出码带测试结果语义（有断言失败即非0），
+    # 不能当执行失败——只要结果文件产出就算成功，评分细节以文件为准
+    if not Path(out_path).exists():
+        print(json.dumps({"error": f"promptfoo 未产出结果: "
+                                   f"{(proc.stderr or proc.stdout)[-300:]}"},
                          ensure_ascii=False))
         return 2
 
