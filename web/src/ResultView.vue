@@ -2,6 +2,7 @@
 // 统一的任务结果渲染组件：当前任务卡 / 首页历史 / 任务中心三处共用
 // 此前结果渲染抄了三份且逐渐漂移（历史无回答面板、无事件卡）——组件化终结该问题
 import { ref } from "vue";
+import DagView from "./DagView.vue";
 
 const props = defineProps({
   task: { type: Object, required: true },
@@ -35,7 +36,11 @@ const approvalsFor = (tid) => props.pending.filter((a) => a.task_id === tid);
 
 <template>
   <div>
-    <!-- 步骤时间线 -->
+    <!-- DAG 调用图（多步任务才有图；单步不占地方） -->
+    <DagView v-if="(task.steps || []).length > 1" :steps="task.steps"
+             @select="toggleStep" />
+
+    <!-- 步骤时间线（图之下的明细列表） -->
     <div v-for="s in task.steps || []" :key="s.id" class="step trace-step"
          :class="{ running: s.status === 'running' }" @click="toggleStep(s.id)">
       {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : '·' }}
