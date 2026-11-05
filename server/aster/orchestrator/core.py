@@ -19,6 +19,13 @@ log = get_logger("orchestrator")
 
 GITHUB_RE = re.compile(r"https?://github\.com/[\w.\-]+/[\w.\-]+/?", re.IGNORECASE)
 
+# 交付终检标准（P0 质量门）：只验对外产出内容的三类意图；确定性 L0 能力零成本不验
+DELIVERY_VERIFY = {
+    "report": "报告结论必须有素材支撑、来源标注真实、无编造内容；摘要忠实呈现要点",
+    "deep_research": "报告内容与引用来源一致，来源真实可核验，无编造；中文表达通顺",
+    "hot_news": "榜单条目与输入素材一致，无编造新闻，中文标题/摘要忠实原文",
+}
+
 # 意图 → (能力名, 附加输入抽取函数)
 TEMPLATES = {
     "repo_analysis": "repo_analysis",
@@ -178,8 +185,23 @@ async def execute(task_id: int) -> None:
                 path.write_text(md, encoding="utf-8")
                 _set_status(conn, task_id, tsm.VERIFYING)
                 if len(md) > 200:
-                    _finish(conn, task_id, summary=f"{md[:1200]}\n\n（完整报告已存 {path}）",
-                            ref=str(path))
+                    summary = f"{md[:1200]}\n\n（完整报告已存 {path}）"
+                    # 交付终检（P0 质量门，report 专属分支同通用路径待遇）
+                    if provider.available():
+                        gate = await asyncio.to_thread(
+                            _llm_verify, DELIVERY_VERIFY["report"], task["goal"],
+                            {"summary": summary[:3000]})
+                        if gate.ok:
+                            summary += "\n\n✓ 已通过独立评审（结论有据/来源可核验/无编造）"
+                        else:
+                            summary += f"\n\n⚠ 交付终检未通过：{gate.error or '质量存疑'}（结果保留供人工核验）"
+                            _set_status(conn, task_id, tsm.PARTIAL)
+                            with tx(conn):
+                                conn.execute("UPDATE tasks SET result_summary=?, result_ref=?, "
+                                             "updated_at=? WHERE id=?",
+                                             (summary, str(path), int(time.time()), task_id))
+                            return
+                    _finish(conn, task_id, summary=summary, ref=str(path))
                 else:
                     _fail(conn, task_id, "报告生成过短，未通过验证")
             except Exception as e:
@@ -305,6 +327,25 @@ async def execute(task_id: int) -> None:
             _set_status(conn, task_id, tsm.VERIFYING)
             if ok_verify:
                 summary = _deliver(intent, result.output)
+                # 交付终检（P0 质量门）：报告/调研/热点三类过独立评审——
+                # 通过标 completed+尾注；未过如实降 partial，不伪装成功（PRD 未验证不显示成功）
+                crit = DELIVERY_VERIFY.get(intent)
+                if crit and provider.available():
+                    gate = await asyncio.to_thread(
+                        _llm_verify, crit, task["goal"],
+                        {"summary": summary[:3000],
+                         "sources_n": len(result.output.get("sources") or [])})
+                    if gate.ok:
+                        summary += "\n\n✓ 已通过独立评审（结论有据/来源可核验/无编造）"
+                    else:
+                        summary += f"\n\n⚠ 交付终检未通过：{gate.error or '质量存疑'}（结果保留供人工核验）"
+                        _set_status(conn, task_id, tsm.PARTIAL)
+                        with tx(conn):
+                            conn.execute("UPDATE tasks SET result_summary=?, result_ref=?, "
+                                         "updated_at=? WHERE id=?",
+                                         (summary, result.output_path or None,
+                                          int(time.time()), task_id))
+                        return
                 # ref 用 runner 的真实落盘路径（_finish 不能再用旧空值覆盖掉它）；
                 # 深度调研的下载件是 markdown 报告本体而非 JSON 明细
                 ref = (result.output.get("report_path")
@@ -371,10 +412,14 @@ async def _execute_planned(conn, task) -> bool | None:
     row_by_seq = {r["seq"]: r for r in step_rows}
     deadline = time.time() + 1800  # 失控闸二：总超时 30 分钟
 
+    # 就绪判据用 finished（完成或已 skip）：skip 的步骤不进 outputs，
+    # 下游引用落"（上游输出缺失）"占位（既有机制），计划不因此卡死
+    finished: set[int] = set()
+    replanned = False  # 每任务限重规划一次（防循环，同 LangGraph 递归上限思想）
+
     def _deps_done(st: dict) -> bool:
-        return all(int(m.group(1)) in outputs
-                   for v in (st.get("input") or {}).values()
-                   if (m := re.match(r"^\$(\d+)\.", str(v))))
+        refs = re.findall(r"\$(\d+)\.", json.dumps(st.get("input") or {}, ensure_ascii=False))
+        return all(int(n) in finished for n in refs)
 
     async def _run_one(st: dict) -> "runner.RunResult":
         """单个步骤执行（能力运行自开连接，与并行兄弟步骤互不干扰）"""
@@ -399,17 +444,27 @@ async def _execute_planned(conn, task) -> bool | None:
                                            goal, outputs)
         if st["capability"] == "llm_task":
             return await asyncio.to_thread(_llm_task, payload)
-        result = None
-        for cand in [st["capability"]] + list(st.get("fallback") or []):
-            cap = registry.get_active(conn, cand)
-            if not cap:
-                continue
-            result = await asyncio.to_thread(
-                runner.run_capability, cap, task["id"], row["id"], payload)
-            if result.ok or result.pending_approval:
-                return result
-            log.info("步骤 %s 能力 %s 失败，尝试接管", st["seq"], cand)
-        return result or runner.RunResult(False, 0, {}, "无可用能力（含 fallback）")
+
+        # 候选链执行（能力→fallback 接管）；on_fail=retry 时整链重试一次
+        async def _attempt() -> "runner.RunResult":
+            r = None
+            for cand in [st["capability"]] + list(st.get("fallback") or []):
+                cap = registry.get_active(conn, cand)
+                if not cap:
+                    continue
+                r = await asyncio.to_thread(
+                    runner.run_capability, cap, task["id"], row["id"], payload)
+                if r.ok or r.pending_approval:
+                    return r
+                log.info("步骤 %s 能力 %s 失败，尝试接管", st["seq"], cand)
+            return r or runner.RunResult(False, 0, {}, "无可用能力（含 fallback）")
+
+        result = await _attempt()
+        if (not result.ok and not result.pending_approval
+                and st.get("on_fail") == "retry"):
+            await asyncio.sleep(2)  # 网络类瞬时失败的粗粒度退避
+            result = await _attempt()
+        return result
 
     remaining = {st["seq"]: st for st in steps}
     while remaining:
@@ -427,12 +482,13 @@ async def _execute_planned(conn, task) -> bool | None:
             return True
         batch = ready[:PARALLEL_CAP]
         results = await asyncio.gather(*[_run_one(st) for st in batch])
-        # fail-fast：批次内任一失败/挂起即终止（先落同批成功者的输出再判断）
+        # 批次收束：成功落 outputs；skip 降级不阻断；挂起/失败按策略处理
         stopped = None
         for st, result in zip(batch, results):
             row = row_by_seq[st["seq"]]
             if result and result.ok:
                 outputs[st["seq"]] = {st.get("output_key") or "output": result.output}
+                finished.add(st["seq"])
                 with tx(conn):
                     conn.execute("UPDATE task_steps SET status='done', output_ref=?, "
                                  "finished_at=? WHERE id=?",
@@ -440,6 +496,15 @@ async def _execute_planned(conn, task) -> bool | None:
             elif result and result.pending_approval:
                 stopped = ("awaiting", st, result)
                 break
+            elif st.get("on_fail") == "skip":
+                # 辅助步骤降级：标 skipped 继续计划（教训机制化：辅助步骤应可降级）
+                finished.add(st["seq"])
+                with tx(conn):
+                    conn.execute("UPDATE task_steps SET status='skipped', error=?, finished_at=? "
+                                 "WHERE id=?",
+                                 (result.error if result else "无可用能力",
+                                  int(time.time()), row["id"]))
+                log.info("任务 %s 步骤 %s 失败按 skip 降级，计划继续", task["id"], st["seq"])
             else:
                 stopped = ("failed", st, result)
                 break
@@ -453,12 +518,46 @@ async def _execute_planned(conn, task) -> bool | None:
                                  (result.error, int(time.time()), task["id"]))
                     conn.execute("UPDATE task_steps SET status='pending', error=? WHERE id=?",
                                  (result.error, row["id"]))
-            else:
-                reason = result.error if result else "无可用能力"
-                with tx(conn):
-                    conn.execute("UPDATE task_steps SET status='failed', error=?, finished_at=? "
-                                 "WHERE id=?", (reason, int(time.time()), row["id"]))
-                _fail(conn, task["id"], f"步骤 {st['seq']} 失败：{reason}")
+                return True
+            # 失败：先试重规划一次（带失败上下文重排剩余，已完成产出保留复用）
+            reason = result.error if result else "无可用能力"
+            with tx(conn):
+                conn.execute("UPDATE task_steps SET status='failed', error=?, finished_at=? "
+                             "WHERE id=?", (reason, int(time.time()), row["id"]))
+            if not replanned:
+                replanned = True
+                done_list = [{"seq": s["seq"], "desc": s.get("desc", ""),
+                              "keys": list(outputs.get(s["seq"], {}).keys())}
+                             for s in steps if s["seq"] in outputs]
+                next_seq = max([r["seq"] for r in row_by_seq.values()] + [0]) + 1
+                new_steps = await asyncio.to_thread(
+                    planner_mod.replan, conn, goal, done_list,
+                    {"seq": st["seq"], "desc": st.get("desc", ""), "error": reason},
+                    list(remaining.values()), next_seq)
+                if new_steps:
+                    with tx(conn):
+                        for nst in new_steps:
+                            deps = sorted({int(n) for n in re.findall(
+                                r"\$(\d+)\.",
+                                json.dumps(nst.get("input") or {}, ensure_ascii=False))})
+                            conn.execute(
+                                "INSERT INTO task_steps(task_id, seq, step_desc, status, "
+                                "output_key, depends_on, input_json) VALUES(?,?,?,?,?,?,?)",
+                                (task["id"], nst["seq"],
+                                 f"{nst.get('desc', '')}［能力 {nst['capability']}·重规划］",
+                                 "pending", nst.get("output_key") or "output",
+                                 json.dumps(deps),
+                                 json.dumps(nst.get("input") or {}, ensure_ascii=False)))
+                    for nr in conn.execute(
+                            "SELECT * FROM task_steps WHERE task_id=? AND seq>=?",
+                            (task["id"], next_seq)).fetchall():
+                        row_by_seq[nr["seq"]] = nr
+                    remaining = {s["seq"]: s for s in new_steps}
+                    log.info("任务 %s 重规划成功，剩余 %d 步（新步自 %d 起）",
+                             task["id"], len(new_steps), next_seq)
+                    continue
+                log.info("任务 %s 重规划失败，最终失败收尾", task["id"])
+            _fail(conn, task["id"], f"步骤 {st['seq']} 失败：{reason}")
             return True
         for st in batch:
             remaining.pop(st["seq"])

@@ -49,7 +49,7 @@ const approvalsFor = (tid) => props.pending.filter((a) => a.task_id === tid);
     <!-- 步骤时间线（图之下的明细列表） -->
     <div v-for="s in task.steps || []" :key="s.id" class="step trace-step"
          :class="{ running: s.status === 'running' }" @click="toggleStep(s.id)">
-      {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : '·' }}
+      {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : s.status === 'skipped' ? '−跳过' : '·' }}
       步骤 {{ s.seq }}：{{ s.step_desc }}
       <span class="hint">（点击查看输入输出）</span>
       <span v-if="s.error" class="err">{{ s.error }}</span>
