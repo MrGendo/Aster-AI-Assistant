@@ -48,6 +48,9 @@ def classify(goal: str) -> str:
         return "planned"  # 显式逃逸口：用户强制走计划路径
     if GITHUB_RE.search(goal):
         return "repo_analysis"
+    # 报告意图优先于热点：含"报告"的热点素材应产报告而非日报（实测路由教训）
+    if re.search(r"(调研|生成|输出|写).{0,6}报告|报告[:：]", goal) and not GITHUB_RE.search(goal):
+        return "report"
     if re.search(r"热点|日报", goal) and len(goal) > 12:
         return "hot_news"
     if re.search(r"统计|字数|行数|词频", goal) and len(goal) < 60:
@@ -126,6 +129,28 @@ async def execute(task_id: int) -> None:
             with tx(conn):
                 conn.execute("UPDATE tasks SET intent='chat' WHERE id=?", (task_id,))
             task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+
+        # 报告型：GLM 按结构化模板生成报告并落盘 data/reports/（进程内伪能力）
+        if intent == "report":
+            _set_status(conn, task_id, tsm.PLANNING)
+            _set_status(conn, task_id, tsm.EXECUTING)
+            materials = re.sub(r"^(帮我|请)?(用|把|将|根据|基于)?(.{0,12}?)?(调研|生成|输出|写)(一份|一个)?(.{0,8}?)报告[:：，,\s]*", "", task["goal"]).strip() or task["goal"]
+            try:
+                md = _make_report(task["goal"], materials)
+                from ..config import DATA_DIR
+                rp = DATA_DIR / "reports"
+                rp.mkdir(exist_ok=True)
+                path = rp / f"report_task{task_id}_{int(time.time())}.md"
+                path.write_text(md, encoding="utf-8")
+                _set_status(conn, task_id, tsm.VERIFYING)
+                if len(md) > 200:
+                    _finish(conn, task_id, summary=f"{md[:1200]}\n\n（完整报告已存 {path}）",
+                            ref=str(path))
+                else:
+                    _fail(conn, task_id, "报告生成过短，未通过验证")
+            except Exception as e:
+                _fail(conn, task_id, f"报告生成失败：{e}")
+            return
 
         # chat 型：无步骤，直接给交付（Phase 1 的对话即任务）
         if intent not in TEMPLATES:
@@ -426,6 +451,20 @@ async def _prefetch_pages(conn, task_id: int, output: dict) -> dict:
     except Exception as e:
         log.info("原文抓取跳过: %s", e)
     return output
+
+
+def _make_report(goal: str, materials: str) -> str:
+    """结构化报告生成：固定模板约束（标题/日期/摘要/正文/结论/来源分级/未验证事项）"""
+    md = provider.chat(
+        [{"role": "user", "content": f"原始请求：{goal}\n\n素材：\n{materials[:8000]}"}],
+        system="你是分析报告撰写人。基于给定素材输出 Markdown 报告，结构固定："
+               "# 标题\n> 日期与主题一行\n## 摘要（3句内）\n## 正文（2-4个小节，"
+               "只使用素材中的事实，标注【素材】）\n## 结论与建议\n"
+               "## 来源与证据分级（哪些来自素材事实、哪些是推断）\n## 未验证事项。\n"
+               "素材没有的内容写明'素材未提供'，禁止编造数据。直接输出报告正文。",
+        max_tokens=3000,
+    )
+    return md.strip()
 
 
 def _enrich_hot_news(output: dict, output_path: str = "") -> dict:
