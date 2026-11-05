@@ -94,10 +94,23 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
         conn = connect()
         try:
             task_id = orchestrator.create_task(conn, message)
+            # 会话留痕：存在活动会话时任务型输入也进历史（恢复会话可见完整过程，
+            # 此前任务卡只在当次对话流里、刷新即失——技术债修复）
+            if conversation_id and conn.execute(
+                    "SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone():
+                now = int(time.time())
+                with tx(conn):
+                    conn.execute("INSERT INTO messages(conversation_id, role, content, "
+                                 "created_at) VALUES(?,?,?,?)",
+                                 (conversation_id, "user", message, now))
+                    conn.execute("INSERT INTO messages(conversation_id, role, content, "
+                                 "created_at) VALUES(?,?,?,?)",
+                                 (conversation_id, "assistant",
+                                  f"已创建任务 #{task_id}，执行进度见对话流，详情在任务中心", now))
         finally:
             conn.close()
         bg.add_task(_run, task_id)
-        return {"type": "task", "id": task_id}
+        return {"type": "task", "id": task_id, "conversation_id": conversation_id}
 
     if not provider.available():
         return {"type": "error",

@@ -89,8 +89,11 @@ def _run_with_conn(
     else:
         script = CAPABILITIES_DIR / entry
 
+    # 按能力覆写解释器（技术债根治：gpt-researcher 阵营 mcp<2 与 browser-use
+    # 阵营 mcp==2.1.1 在同一 venv 无解——deep_research 拆独立 venv，互不污染）
+    py = os.environ.get(f"ASTER_WORKER_PYTHON_{cap_row['name'].upper()}", str(WORKER_PYTHON))
     proc = subprocess.Popen(
-        [str(WORKER_PYTHON), str(script)],
+        [py, str(script)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, start_new_session=True,  # 独立进程组：超时可整组终止
         env={**os.environ, "ASTER_SANDBOX": str(sandbox)},

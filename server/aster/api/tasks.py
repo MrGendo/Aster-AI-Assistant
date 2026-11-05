@@ -78,7 +78,13 @@ def cancel_task(task_id: int) -> dict:
     conn = connect()
     try:
         ok = orchestrator.request_cancel(conn, task_id)
-        return {"ok": ok, "note": "已记录取消请求；状态将在执行实际停止后更新" if ok else "任务已结束或不可取消"}
+        if not ok:
+            return {"ok": False, "note": "任务已结束或不可取消"}
+        # awaiting_user 无执行循环，取消即时生效——文案按实际结果说
+        st = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return {"ok": True,
+                "note": "已取消" if st and st["status"] == "cancelled"
+                else "已记录取消请求；状态将在执行实际停止后更新"}
     finally:
         conn.close()
 
