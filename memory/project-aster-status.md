@@ -10,3 +10,5 @@ Aster 于 2026-11-04 **整体转向**：需求源为 `product_requirement.md`（
 **Why:** SDD 规约与用户"按新 PRD 重做"指令；形态/归档/GLM 三项均为用户拍板结果。
 
 **How to apply:** 服务启动 `.venv/bin/python server/run.py`（127.0.0.1:8317），前端改动 `cd web && pnpm build`；Stage 2（开源比较与自动接入）未经用户批准不得开始；需求判定只看 `product_requirement.md`（§20 边界清单防扩权）；每片勾选+任务日志；测试 `cd server && ../.venv/bin/python -m pytest tests/ -q`。
+
+**2026-11-05 deep_research 集成**（候选#13 gpt-researcher ★30489 Apache-2.0，doc-first 关卡后接入）：第 11 个能力，L1 门禁，GLM(anthropic路由)+本地bge+duckduckgo 免费检索；任务#70 端到端 11861 字/11 引用/$0.12/146s。关键坑：glm-4.7 thinking 块需压平 ChatAnthropic；gpt-researcher 检索器急切导入需 langchain-mcp-adapters；duckduckgo 拆包需 ddgs。教训：重启服务必须 kill $(lsof -ti :8317 -sTCP:LISTEN)，不加 -sTCP:LISTEN 会杀错进程导致旧代码继续服务（本次误判路由失效 20 分钟）。
