@@ -1,13 +1,15 @@
 <script setup>
 // DAG 调用图：任务的步骤依赖关系可视化（vue-flow 渲染）
 // 节点=步骤（状态着色），边=数据流依赖（depends_on）；点击节点展开输入输出
-import { computed } from "vue";
-import { VueFlow } from "@vue-flow/core";
+import { computed, ref } from "vue";
+import { MarkerType, VueFlow } from "@vue-flow/core";
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
 
 const props = defineProps({ steps: { type: Array, required: true } });
 const emit = defineEmits(["select"]);
+// 默认折叠（用户偏好）：点标题行展开图，避免多步任务详情一打开就是一大块
+const expanded = ref(false);
 
 const STATUS_COLOR = {
   done: "#2f9e63", running: "#316ef3", failed: "#d64545",
@@ -54,8 +56,11 @@ const edges = computed(() => {
     for (const d of parseDeps(s)) {
       out.push({
         id: `${d}->${s.seq}`, source: String(d), target: String(s.seq),
+        type: "smoothstep",
         animated: s.status === "running",
-        style: { stroke: "#86868b" },
+        // 实测反馈：无边箭头看不懂方向——补箭头并加深线条
+        markerEnd: MarkerType.ArrowClosed,
+        style: { stroke: "#5a5a60", strokeWidth: 1.6 },
       });
     }
   }
@@ -65,8 +70,10 @@ const edges = computed(() => {
 
 <template>
   <div class="dag-box">
-    <p class="hint">调用图（节点=步骤，箭头=数据依赖；点击节点查看输入输出；滚轮缩放/拖拽平移）</p>
-    <div class="dag-canvas">
+    <div class="dag-head" @click="expanded = !expanded">
+      {{ expanded ? '▾' : '▸' }} 调用图（{{ props.steps.length }} 步 · 依赖箭头 · 点击节点看输入输出）
+    </div>
+    <div v-show="expanded" class="dag-canvas">
       <VueFlow :nodes="nodes" :edges="edges" :fit-view-on-init="true" :min-zoom="0.3"
                @node-click="(_, n) => emit('select', n.data.seq)">
         <template #node-default="{ id, data }">
@@ -84,7 +91,10 @@ const edges = computed(() => {
 <style scoped>
 .dag-box { border: 1px solid var(--line, #e5e5e8); border-radius: 10px;
            margin: 8px 0; overflow: hidden; }
-.dag-canvas { height: 260px; }
+.dag-head { padding: 6px 12px; font-size: 13px; cursor: pointer;
+            color: var(--dim, #86868b); user-select: none; }
+.dag-head:hover { background: var(--bg, #f7f7f8); }
+.dag-canvas { height: 260px; border-top: 1px solid var(--line, #e5e5e8); }
 .dag-node { padding: 6px 10px; font-size: 12px; border: 2px solid #86868b;
             border-radius: 10px; background: #fff; color: #1d1d1f; width: 170px; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;

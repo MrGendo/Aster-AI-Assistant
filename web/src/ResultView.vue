@@ -2,7 +2,13 @@
 // 统一的任务结果渲染组件：当前任务卡 / 首页历史 / 任务中心三处共用
 // 此前结果渲染抄了三份且逐渐漂移（历史无回答面板、无事件卡）——组件化终结该问题
 import { ref } from "vue";
+import MarkdownIt from "markdown-it";
 import DagView from "./DagView.vue";
+
+// Markdown 渲染（html:false 转义原始标签，本地内容的安全底线）
+const md = new MarkdownIt({ html: false, linkify: true });
+const looksMd = (s) => /^#|\n#{1,3} |\*\*|^\s*[-*] /m.test(s || "");
+const mdHtml = (s) => md.render(s || "");
 
 const props = defineProps({
   task: { type: Object, required: true },
@@ -91,8 +97,16 @@ const approvalsFor = (tid) => props.pending.filter((a) => a.task_id === tid);
         </div>
         <p class="hint">输入 {{ task.result_detail.total_input }} 条 · 聚合去重 {{ task.result_detail.removed_duplicates }} 条同题报道</p>
       </div>
+      <div v-else-if="task.result_summary && looksMd(task.result_summary)"
+           class="md result" v-html="mdHtml(task.result_summary)"></div>
       <pre v-else-if="task.result_summary" class="result">{{ task.result_summary }}</pre>
       <pre v-else-if="task.error" class="result err">{{ task.error }}</pre>
+      <!-- 产物下载：报告/结果文件（路径由服务端从库取，客户端不传路径） -->
+      <div v-if="task.result_ref" class="row" style="padding:8px 12px">
+        <a :href="`/api/tasks/${task.id}/file`" download>
+          <button>下载 {{ task.result_ref.split('/').pop() }}</button>
+        </a>
+      </div>
     </div>
 
     <details v-if="task.result_detail">
@@ -121,6 +135,15 @@ button.primary { background: #316ef3; border-color: #316ef3; color: #fff; }
                 background: var(--bg); border-radius: 8px; }
 .result { background: var(--bg); border-radius: 8px; padding: 12px;
           white-space: pre-wrap; font-size: 13px; }
+/* markdown 渲染样式 */
+.md :is(h1, h2, h3) { margin: 10px 0 6px; font-size: 15px; }
+.md h1 { font-size: 17px; }
+.md p { margin: 6px 0; }
+.md ul, .md ol { padding-left: 20px; margin: 6px 0; }
+.md blockquote { border-left: 3px solid var(--line); margin: 6px 0; padding: 2px 10px;
+                 color: var(--dim); }
+.md code { background: rgba(127,127,127,.15); border-radius: 4px; padding: 1px 5px; }
+.md a { color: #316ef3; }
 .answer-panel { border: 1px solid #316ef3; border-radius: 10px; margin: 10px 0 4px; overflow: hidden; }
 .answer-head { background: rgba(49, 110, 243, .12); color: #316ef3; font-size: 12px;
                font-weight: 700; padding: 4px 12px; letter-spacing: 2px; }

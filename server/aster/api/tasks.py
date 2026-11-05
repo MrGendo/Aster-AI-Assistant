@@ -3,7 +3,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from ..db import connect
 from ..orchestrator import core as orchestrator
@@ -217,6 +217,27 @@ def step_io(step_id: int) -> dict:
             "input": s["input_json"] or "", "output": output, "error": s["error"],
             "started_at": s["started_at"], "finished_at": s["finished_at"],
         }
+    finally:
+        conn.close()
+
+
+@router.get("/tasks/{task_id}/file")
+def task_file(task_id: int) -> FileResponse:
+    """下载任务的落盘产物（报告/结果 JSON）。路径服务端从库里取并校验在数据目录内——
+    不接受客户端传路径，杜绝目录穿越。"""
+    from pathlib import Path
+    from ..config import DATA_DIR
+    conn = connect()
+    try:
+        row = conn.execute("SELECT result_ref FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row or not row["result_ref"]:
+            raise HTTPException(404, "该任务无可下载产物")
+        p = Path(row["result_ref"]).resolve()
+        if not str(p).startswith(str(DATA_DIR.resolve())):
+            raise HTTPException(403, "路径越界")
+        if not p.exists():
+            raise HTTPException(404, "文件不存在")
+        return FileResponse(p, filename=p.name)
     finally:
         conn.close()
 
