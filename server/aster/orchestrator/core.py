@@ -45,6 +45,13 @@ def classify(goal: str) -> str:
         return "mem0_add"
     if re.match(r"^(回忆|你记得|查一下记忆)", goal):
         return "mem0_search"
+    # 待办：前缀强意图（"待办：X"/"添加待办 X"）；列出用固定短语。
+    # 完成勾选故意不做对话路由——口语指代易错位，UI 点击才可靠
+    if (re.match(r"^(待办|todo)[:：]", goal, re.IGNORECASE)
+            or re.match(r"^(添加|记个|记一个|新增|加一个)(一个)?待办", goal)):
+        return "todo_add"
+    if re.search(r"看看待办|待办列表|我的待办|列出待办", goal):
+        return "todo_list"
     # 深度调研：自主联网调研主题出报告——该能力自带研究规划，不拆多步路径。
     # "全面调研"从复合连接词移出归本规则（本身就是单能力强意图）；带仓库链接/顺序复合仍让路
     if (re.search(r"深度调研|深入调研|全面调研", goal)
@@ -103,12 +110,21 @@ def create_task(conn: sqlite3.Connection, goal: str, project_id=None) -> int:
 
 
 def request_cancel(conn: sqlite3.Connection, task_id: int) -> bool:
-    """PRD §4.4：只置请求标志，状态由执行循环在实际停止后落 cancelled"""
+    """PRD §4.4：只置请求标志，状态由执行循环在实际停止后落 cancelled。
+    awaiting_user 例外——没有执行循环在跑，置了标志也没人消费，直接落终态 cancelled
+    （停在审批口的任务用户拒绝等待时只能干看着，实测踩到）"""
+    now = int(time.time())
     with tx(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status='cancelled', updated_at=? WHERE id=? AND status=?",
+            (now, task_id, tsm.AWAITING_USER),
+        )
+        if cur.rowcount:
+            return True
         cur = conn.execute(
             "UPDATE tasks SET cancel_requested=1, updated_at=? WHERE id=? AND status IN "
             "(?,?,?,?)",
-            (int(time.time()), task_id, tsm.PENDING, tsm.PLANNING, tsm.EXECUTING, tsm.VERIFYING),
+            (now, task_id, tsm.PENDING, tsm.PLANNING, tsm.EXECUTING, tsm.VERIFYING),
         )
     return cur.rowcount > 0
 

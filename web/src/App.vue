@@ -157,6 +157,10 @@ async function submitGoal() {
   } else if (r.type === "chat") {
     convId.value = r.conversation_id;
     thread.value.push({ role: "user", content: goal }, { role: "assistant", content: r.reply });
+  } else if (r.type === "todo") {
+    // 待办回执进对话线程，同时刷新待办列表
+    thread.value.push({ role: "user", content: goal }, { role: "assistant", content: r.reply });
+    loadTodos();
   } else {
     activeTask.value = { goal, status: "failed", error: r.error || "发送失败" };
   }
@@ -208,9 +212,58 @@ async function addMemory() {
 }
 async function delMemory(id) { await api(`/memories/${id}`, { method: "DELETE" }); refresh(); }
 
+// 待办管理（学 todo.txt/taskwarrior，设计见 docs/superpowers/specs/2026-11-05-todo-management-design.md）
+const todoList = ref({ pending: [], done: [] });
+const todoText = ref("");
+const todoFilter = ref("open");
+const todoQuery = ref("");
+const editingTodo = ref(null);   // { id, content } 就地编辑
+const todoEdit = ref("");
+async function loadTodos() { todoList.value = await api("/todos"); }
+async function addTodo() {
+  const t = todoText.value.trim();
+  if (!t) return;
+  todoText.value = "";
+  await api("/todos", { method: "POST", body: JSON.stringify({ content: t }) });
+  loadTodos();
+}
+async function toggleTodo(t) {
+  await api(`/todos/${t.id}`, { method: "PATCH", body: JSON.stringify({ done: !t.done }) });
+  loadTodos();
+}
+async function delTodo(id) { await api(`/todos/${id}`, { method: "DELETE" }); loadTodos(); }
+function startEdit(t) { editingTodo.value = t.id; todoEdit.value = t.content; }
+async function saveEdit(id) {
+  const t = todoEdit.value.trim();
+  if (t) await api(`/todos/${id}`, { method: "PATCH", body: JSON.stringify({ content: t }) });
+  editingTodo.value = null;
+  loadTodos();
+}
+// 转任务：待办交给 agent 执行（结果不自动勾选——执行完成≠达到目的，由用户判断）
+async function runTodo(t) {
+  const r = await api(`/todos/${t.id}/run`, { method: "POST" });
+  if (r.error) return alert(r.error);
+  await loadTodos();
+  refresh();
+}
+function dueBadge(t) {
+  if (!t.due) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  return { text: t.due, cls: t.due < today ? "overdue" : t.due === today ? "today" : "" };
+}
+// 过滤在客户端做（待办量级小），搜索按 todo.txt 哲学切自由文本
+const todoShown = computed(() => {
+  const q = todoQuery.value.trim();
+  const match = (t) => !q || (t.content + (t.priority || "") + (t.due || "")).includes(q);
+  if (todoFilter.value === "open") return todoList.value.pending.filter(match);
+  if (todoFilter.value === "done") return todoList.value.done.filter(match);
+  return [...todoList.value.pending, ...todoList.value.done].filter(match);
+});
+
 const homeRecent = computed(() => tasks.value.slice(0, 6));
 onMounted(() => {
   refresh();
+  loadTodos();
   // 待审批/任务状态自动刷新：否则审批角标不出现，用户只能干等（实测反馈）
   setInterval(refresh, 5000);
 });
@@ -220,7 +273,7 @@ onMounted(() => {
   <div class="shell">
     <nav class="side">
       <div class="brand">Aster</div>
-      <button v-for="t in [['home','首页'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]":key="t[0]"
+      <button v-for="t in [['home','首页'],['todos','待办'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]":key="t[0]"
               :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
       <div v-if="sys" class="side-status" :class="{ warn: sys.paused }">
         {{ sys.paused ? "已暂停" : sys.provider_ready ? "运行中" : "模型未配置" }}
@@ -281,6 +334,44 @@ onMounted(() => {
           </div>
         </template>
         <p v-if="!homeRecent.length" class="empty">还没有任务。粘贴一个仓库链接试试，例如 https://github.com/asg017/sqlite-vec</p>
+      </section>
+
+      <!-- 待办管理：学 todo.txt（自由文本+语法）与 taskwarrior（due 驱动排序） -->
+      <section v-if="tab === 'todos'">
+        <div class="row spread">
+          <h1>待办</h1>
+          <div class="row" style="margin:0">
+            <input v-model="todoQuery" style="width:180px" placeholder="搜索待办" />
+            <button v-for="f in [['open','进行中'],['done','已完成'],['all','全部']]":key="f[0]"
+                    :class="{ ghost: todoFilter !== f[0] }" @click="todoFilter = f[0]">{{ f[1] }}</button>
+          </div>
+        </div>
+        <div class="card row">
+          <input v-model="todoText" style="flex:1" placeholder="新增待办，支持语法：(A) 优先级 · @2026-11-08 或 截止2026-11-08 或 明天"
+                 @keydown.enter="addTodo" />
+          <button class="primary" @click="addTodo">添加</button>
+        </div>
+        <div v-for="t in todoShown" :key="t.id" class="card todo-row" :class="{ done: t.done }">
+          <input type="checkbox" :checked="t.done" @change="toggleTodo(t)" />
+          <span v-if="t.priority" class="pri">{{ t.priority }}</span>
+          <span v-if="dueBadge(t)" class="due" :class="dueBadge(t).cls">{{ dueBadge(t).text }}</span>
+          <template v-if="editingTodo === t.id">
+            <input v-model="todoEdit" style="flex:1" @keydown.enter="saveEdit(t.id)"
+                   @keydown.esc="editingTodo = null" />
+            <button class="primary" @click="saveEdit(t.id)">保存</button>
+          </template>
+          <template v-else>
+            <span class="todo-content" @dblclick="startEdit(t)">{{ t.content }}</span>
+            <span v-if="t.done" class="hint">完成于 {{ new Date((t.done_at || 0) * 1000).toLocaleDateString() }}</span>
+            <span v-if="t.task_id" class="tag">任务#{{ t.task_id }}</span>
+            <span class="row-actions">
+              <button v-if="!t.done" class="ghost" @click="startEdit(t)">编辑</button>
+              <button v-if="!t.done && !t.task_id" class="ghost" @click="runTodo(t)">转任务</button>
+              <button class="ghost danger" @click="delTodo(t.id)">删除</button>
+            </span>
+          </template>
+        </div>
+        <p v-if="!todoShown.length" class="empty">没有符合条件的待办</p>
       </section>
 
       <!-- 任务中心：搜索 + 多选批量 + 行内管理 -->
@@ -513,6 +604,16 @@ a.hottitle:hover { color: var(--accent); }
 .hotorig { font-size: 12px; color: var(--dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hotsum { font-size: 13px; margin-top: 4px; opacity: .85; }
 .approval span { font-size: 13px; }
+/* 待办：学 taskwarrior 的逾期强调与 todo.txt 的完成沉底 */
+.todo-row { display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
+.todo-row .todo-content { flex: 1; font-size: 14px; }
+.todo-row.done .todo-content { text-decoration: line-through; color: var(--dim); }
+.pri { font-size: 12px; font-weight: 700; color: #b7791f;
+       background: #fff3d6; border-radius: 6px; padding: 1px 7px; }
+.due { font-size: 12px; color: var(--dim); }
+.due.overdue { color: #c53030; font-weight: 600; }
+.due.today { color: #b7791f; font-weight: 600; }
+.row-actions { display: flex; gap: 6px; }
 </style>
 <style scoped>
 /* 审批盒与运行步骤的视觉强调（首页主流程用） */
