@@ -1,0 +1,139 @@
+<script setup>
+// 统一的任务结果渲染组件：当前任务卡 / 首页历史 / 任务中心三处共用
+// 此前结果渲染抄了三份且逐渐漂移（历史无回答面板、无事件卡）——组件化终结该问题
+import { ref } from "vue";
+
+const props = defineProps({
+  task: { type: Object, required: true },
+  pending: { type: Array, default: () => [] },  // 全局待审批列表（父级传入，避免组件内重复轮询）
+});
+const emit = defineEmits(["approve", "reject"]);
+
+const STATUS_TEXT = {
+  pending: "待处理", planning: "规划中", executing: "执行中", awaiting_user: "等待确认",
+  verifying: "验证中", completed: "已完成", partial: "部分完成", failed: "失败", cancelled: "已取消",
+};
+const isTerminal = (s) => ["completed", "partial", "failed", "cancelled"].includes(s);
+
+async function api(path) {
+  const res = await fetch(`/api${path}`, { headers: { "Content-Type": "application/json" } });
+  return res.ok ? res.json() : { error: "请求失败" };
+}
+
+// 步骤级 trace：点击步骤行展开输入/输出
+const openStep = ref(null);
+const stepIO = ref(null);
+async function toggleStep(sid) {
+  if (openStep.value === sid) { openStep.value = null; return; }
+  openStep.value = sid;
+  stepIO.value = await api(`/steps/${sid}/io`);
+}
+
+// 本任务待审批单
+const approvalsFor = (tid) => props.pending.filter((a) => a.task_id === tid);
+</script>
+
+<template>
+  <div>
+    <!-- 步骤时间线 -->
+    <div v-for="s in task.steps || []" :key="s.id" class="step trace-step"
+         :class="{ running: s.status === 'running' }" @click="toggleStep(s.id)">
+      {{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' : s.status === 'failed' ? '✗' : '·' }}
+      步骤 {{ s.seq }}：{{ s.step_desc }}
+      <span class="hint">（点击查看输入输出）</span>
+      <span v-if="s.error" class="err">{{ s.error }}</span>
+      <div v-if="openStep === s.id && stepIO" class="io-box" @click.stop>
+        <b>输入</b>
+        <pre class="result">{{ stepIO.input || "（无）" }}</pre>
+        <b>输出</b>
+        <pre class="result">{{ stepIO.output || stepIO.error || "（无）" }}</pre>
+      </div>
+    </div>
+
+    <div v-if="task.cancel_requested && !isTerminal(task.status)" class="warn-note">
+      已收到取消请求，将在当前步骤停止后生效
+    </div>
+
+    <!-- 审批：批准/拒绝事件抛给父级处理（批准后自动续跑的策略归父级） -->
+    <div v-if="task.status === 'awaiting_user'" class="approval-box">
+      <div v-for="a in approvalsFor(task.id)" :key="a.id" class="row spread approval">
+        <span>{{ a.reason }}</span>
+        <span>
+          <button class="primary" @click="emit('approve', a.id, task.id)">批准并继续</button>
+          <button @click="emit('reject', a.id)">拒绝</button>
+        </span>
+      </div>
+      <p v-if="!approvalsFor(task.id).length" class="hint">没有待审批项——若此前已拒绝，可修改输入后重试。</p>
+    </div>
+
+    <!-- 回答：专属面板；热点类渲染事件卡榜单 -->
+    <div v-if="isTerminal(task.status)" class="answer-panel">
+      <div class="answer-head">{{ task.error ? '错误' : '回答' }}</div>
+      <div v-if="task.result_detail?.top_items" class="hotboard">
+        <div v-for="(it, i) in task.result_detail.top_items" :key="i" class="hotcard">
+          <span class="rank" :class="'r' + (i + 1)">{{ i + 1 }}</span>
+          <div class="hotbody">
+            <a v-if="it.url" :href="it.url" target="_blank" class="hottitle">{{ it.title_cn || it.title }}</a>
+            <span v-else class="hottitle">{{ it.title_cn || it.title }}</span>
+            <div v-if="it.title_cn && it.title_cn !== it.title" class="hotorig">{{ it.title }}</div>
+            <div v-if="it.summary_cn" class="hotsum">{{ it.summary_cn }}</div>
+            <div class="hotmeta">
+              <span class="tag">{{ it.category }}</span>
+              <span>{{ it.source }}</span>
+              <span class="heat">热度 {{ it.weighted_score }}</span>
+            </div>
+          </div>
+        </div>
+        <p class="hint">输入 {{ task.result_detail.total_input }} 条 · 聚合去重 {{ task.result_detail.removed_duplicates }} 条同题报道</p>
+      </div>
+      <pre v-else-if="task.result_summary" class="result">{{ task.result_summary }}</pre>
+      <pre v-else-if="task.error" class="result err">{{ task.error }}</pre>
+    </div>
+
+    <details v-if="task.result_detail">
+      <summary>完整报告（事实与推测已分级）</summary>
+      <pre class="result">{{ JSON.stringify(task.result_detail, null, 2) }}</pre>
+    </details>
+  </div>
+</template>
+
+<style scoped>
+.step { color: var(--dim); font-size: 13px; padding: 2px 0; }
+.step.running { color: var(--run); font-weight: 600; }
+.trace-step { cursor: pointer; padding: 2px 4px; border-radius: 6px; }
+.trace-step:hover { background: var(--bg); }
+.io-box { margin: 6px 0 4px 18px; }
+.io-box b { font-size: 12px; color: var(--dim); }
+.row { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+.row.spread { justify-content: space-between; }
+button { border: 1px solid var(--line); background: var(--card); color: inherit;
+         border-radius: 8px; padding: 5px 12px; cursor: pointer; font: inherit; }
+button.primary { background: #316ef3; border-color: #316ef3; color: #fff; }
+.hint { color: var(--dim); font-size: 12px; }
+.err { color: #d64545; }
+.warn-note { color: #d97a06; font-size: 13px; }
+.approval-box { border-left: 3px solid #d97a06; padding: 8px 12px; margin: 8px 0;
+                background: var(--bg); border-radius: 8px; }
+.result { background: var(--bg); border-radius: 8px; padding: 12px;
+          white-space: pre-wrap; font-size: 13px; }
+.answer-panel { border: 1px solid #316ef3; border-radius: 10px; margin: 10px 0 4px; overflow: hidden; }
+.answer-head { background: rgba(49, 110, 243, .12); color: #316ef3; font-size: 12px;
+               font-weight: 700; padding: 4px 12px; letter-spacing: 2px; }
+.hotboard { display: flex; flex-direction: column; gap: 8px; margin: 8px; }
+.hotcard { display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px;
+           background: var(--bg); border-radius: 10px; }
+.rank { min-width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center;
+        justify-content: center; font-weight: 700; font-size: 13px;
+        background: var(--line); color: var(--dim); }
+.rank.r1 { background: #fde2e2; color: #c53030; }
+.rank.r2 { background: #fff3d6; color: #b7791f; }
+.rank.r3 { background: #e6ffed; color: #2f855a; }
+.hottitle { font-weight: 600; color: inherit; text-decoration: none; }
+a.hottitle:hover { color: #316ef3; }
+.hotorig { font-size: 12px; color: var(--dim); margin-top: 2px; overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+.hotsum { font-size: 13px; margin-top: 4px; opacity: .85; }
+.hotmeta { display: flex; gap: 10px; font-size: 12px; color: var(--dim); margin-top: 3px; align-items: center; }
+.heat { color: #d97a06; }
+.tag { background: var(--bg); border-radius: 6px; padding: 0 6px; font-size: 12px; color: var(--dim); }
+</style>
