@@ -33,7 +33,12 @@ TEMPLATES = {
 
 def classify(goal: str) -> str:
     """意图分类：先用确定性规则（快且零成本），LLM 可用且规则未命中时再问模型"""
-    if GITHUB_RE.search(goal) and re.search(r"质量|评分", goal):
+    # 规划执行前缀绝对优先：显式多步协作不许被单能力规则劫持（实测教训）
+    if goal.startswith("规划执行：") or goal.startswith("规划执行:"):
+        return "planned"
+    # 复合目标连接词：单能力规则遇到它们让路给规划器
+    COMPOSITE = bool(re.search(r"同时|然后|最后|并且|综合|全面调研|分别", goal))
+    if GITHUB_RE.search(goal) and re.search(r"质量|评分", goal) and not COMPOSITE:
         return "repo_quality"
     if re.match(r"^(记住|记一下)", goal):
         return "mem0_add"
@@ -44,8 +49,6 @@ def classify(goal: str) -> str:
         return "browser"
     if GITHUB_RE.search(goal) and re.search(r"摘要|总结|翻译|写成|点评", goal):
         return "planned"  # 复合目标（分析+加工）→ 多步协作路径
-    if goal.startswith("规划执行：") or goal.startswith("规划执行:"):
-        return "planned"  # 显式逃逸口：用户强制走计划路径
     if GITHUB_RE.search(goal):
         return "repo_analysis"
     # 报告意图优先于热点：含"报告"的热点素材应产报告而非日报（实测路由教训）
@@ -338,16 +341,21 @@ async def _execute_planned(conn, task) -> bool | None:
     async def _run_one(st: dict) -> "runner.RunResult":
         """单个步骤执行（能力运行自开连接，与并行兄弟步骤互不干扰）"""
         row = row_by_seq[st["seq"]]
+
+        def _resolve(m):
+            # 嵌入式引用替换（实测教训：规划器常把 $1.key 写进句子中间而非整值）
+            n, key = int(m.group(1)), m.group(2)
+            val = outputs.get(n, {}).get(key)
+            if isinstance(val, dict) and key in val:
+                val = val[key]
+            if isinstance(val, (dict, list)):
+                val = json.dumps(val, ensure_ascii=False)
+            return str(val) if val is not None else "（上游输出缺失）"
+
         payload = {}
         for k, v in (st.get("input") or {}).items():
-            m = re.match(r"^\$(\d+)\.(\w+)$", str(v))
-            if not m:
-                payload[k] = v
-                continue
-            val = outputs.get(int(m.group(1)), {}).get(m.group(2))
-            if isinstance(val, dict) and m.group(2) in val:
-                val = val[m.group(2)]
-            payload[k] = val
+            payload[k] = re.sub(r"\$(\d+)\.(\w+)", _resolve, str(v)) if isinstance(v, str) \
+                else (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
         if st["capability"] == "llm_verify":
             return await asyncio.to_thread(_llm_verify, st.get("verify", "输出质量合格"),
                                            goal, outputs)
