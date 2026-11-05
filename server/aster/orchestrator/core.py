@@ -312,8 +312,10 @@ async def _execute_planned(conn, task) -> bool | None:
         conn.execute("UPDATE tasks SET plan_json=?, updated_at=? WHERE id=?",
                      (json.dumps(steps, ensure_ascii=False), int(_t.time()), task["id"]))
         for i, st in enumerate(steps, 1):
-            deps = [int(m.group(1)) for v in (st.get("input") or {}).values()
-                    if (m := re.match(r"^\$(\d+)\.", str(v)))]
+            # 嵌入感知的依赖提取：$N 可能出现在值的任意位置（与执行层替换同源的问题）
+            deps = sorted({int(n) for n in
+                           re.findall(r"\$(\d+)\.",
+                                      json.dumps(st.get("input") or {}, ensure_ascii=False))})
             conn.execute(
                 "INSERT INTO task_steps(task_id, seq, step_desc, status, output_key, depends_on, "
                 "input_json) VALUES(?,?,?,?,?,?,?)",

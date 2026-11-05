@@ -17,7 +17,14 @@ const STATUS_COLOR = {
 };
 
 function parseDeps(s) {
-  try { return JSON.parse(s.depends_on || "[]"); } catch { return []; }
+  // 优先读入库的 depends_on；历史任务入库时被整值匹配提空 → 从 input_json 兜底扫描 $N 引用
+  let deps = [];
+  try { deps = JSON.parse(s.depends_on || "[]"); } catch { deps = []; }
+  if (!deps.length && s.input_json) {
+    const refs = s.input_json.match(/\$(\d+)\./g) || [];
+    deps = [...new Set(refs.map((r) => parseInt(r.slice(1), 10)))];
+  }
+  return deps;
 }
 
 // 分层布局：无依赖为第 0 层，否则 = max(依赖层)+1（无需 dagre，步骤数少）
