@@ -1,8 +1,13 @@
 <script setup>
 // Aster 平台 Phase 1 前端：四个一级页面（PRD §10.2）
 // 视觉基线遵循 PRD §10.7：中性色为主、状态色语义化、清晰层级、无装饰性动画
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
+import MarkdownIt from "markdown-it";
 import ResultView from "./ResultView.vue";
+
+// 对话流里的 markdown 渲染（与 ResultView 同规则：html:false 防注入）
+const md = new MarkdownIt({ html: false, linkify: true });
+const mdHtml = (s) => md.render(s || "");
 
 const tab = ref("home");
 const tasks = ref([]);
@@ -58,14 +63,7 @@ async function deleteTask(tid) {
   await api(`/tasks/${tid}`, { method: "DELETE" });
   refresh();
 }
-// 历史就地展开（不跳任务中心）
-const expandedId = ref(null);
-const histDetail = ref(null);
-async function toggleHistory(tid) {
-  if (expandedId.value === tid) { expandedId.value = null; return; }
-  expandedId.value = tid;
-  histDetail.value = await api(`/tasks/${tid}`);
-}
+// 历史任务全部收在任务中心；首页只保留对话（用户 2026-11-05 定稿）
 const newMem = ref({ scope: "preference", content: "" });
 // Stage 2：发现与评估
 const cands = ref([]);
@@ -107,8 +105,8 @@ async function approveAndRetry(aid, tid) {
   if (r.error) return alert(r.error);
   await refresh();
   await retryTask(tid);
-  // 重试后继续跟踪该任务，首页当前卡实时刷新
-  activeTask.value = { id: tid, goal: activeTask.value?.goal || "", status: "pending" };
+  // 重试后继续跟踪该任务，对话流任务卡实时刷新
+  taskCards.value[tid] = { id: tid, goal: taskCards.value[tid]?.goal || "", status: "pending" };
   watchTask(tid);
 }
 async function rejectApproval(aid) {
@@ -148,24 +146,28 @@ async function submitGoal() {
   const goal = goalText.value.trim();
   if (!goal) return;
   goalText.value = "";
-  // 单一入口：服务端分类——任务型建任务卡，对话型进线程（追问带上下文）
+  // 单一入口：服务端分类——任务型在流里开任务卡气泡，对话/待办型进线程
   const r = await api("/chat", { method: "POST", body: JSON.stringify({ message: goal, conversation_id: convId.value || undefined }) });
   if (r.type === "task") {
-    activeTask.value = { id: r.id, goal, status: "pending" };
+    thread.value.push({ role: "user", content: goal }, { role: "task", id: r.id });
+    taskCards.value[r.id] = { id: r.id, goal, status: "pending" };
     await refresh();
     watchTask(r.id);
   } else if (r.type === "chat") {
     convId.value = r.conversation_id;
     thread.value.push({ role: "user", content: goal }, { role: "assistant", content: r.reply });
   } else if (r.type === "todo") {
-    // 待办回执进对话线程，同时刷新待办列表
+    // 待办/闹钟/定时回执进对话线程，同时刷新待办与调度列表
     thread.value.push({ role: "user", content: goal }, { role: "assistant", content: r.reply });
-    loadTodos();
+    loadTodos(); loadSchedules();
   } else {
-    activeTask.value = { goal, status: "failed", error: r.error || "发送失败" };
+    thread.value.push({ role: "user", content: goal },
+                      { role: "assistant", content: r.error || "发送失败" });
   }
 }
 
+// 对话流里的任务卡：watchTask 把状态/结果实时写进这里（模板按 thread 里的 id 取）
+const taskCards = ref({});
 function watchTask(id) {
   if (runningTask.value) runningTask.value.close();
   const es = new EventSource(`/api/tasks/${id}/events`);
@@ -173,14 +175,10 @@ function watchTask(id) {
   es.onmessage = (ev) => {
     if (ev.data === "[DONE]") {
       es.close(); runningTask.value = null;
-      // 完成后把完整回答拉回首页答案卡，同时刷新列表
-      api(`/tasks/${id}`).then((d) => { activeTask.value = d; });
+      api(`/tasks/${id}`).then((d) => { taskCards.value[id] = d; });
       refresh();
     } else {
-      // 状态每次变化拉一次详情：首页就地刷新步骤进度（任务级状态变更次数有限，开销可忽略）
-      api(`/tasks/${id}`).then((d) => {
-        if (activeTask.value && activeTask.value.id === id) activeTask.value = d;
-      });
+      api(`/tasks/${id}`).then((d) => { taskCards.value[id] = d; });
     }
   };
   es.onerror = () => { es.close(); runningTask.value = null; };
@@ -260,23 +258,89 @@ const todoShown = computed(() => {
   return [...todoList.value.pending, ...todoList.value.done].filter(match);
 });
 
-const homeRecent = computed(() => tasks.value.slice(0, 6));
+// 定时调度与通知（APScheduler 后端的界面侧）
+const schedules = ref([]);
+const notifications = ref([]);
+const notifOpen = ref(false);
+const schedForm = ref({ kind: "task", goal: "", when: "" });
+async function loadSchedules() { schedules.value = await api("/schedules"); }
+async function loadNotifications() { notifications.value = await api("/notifications?limit=20"); }
+async function markAllRead() {
+  await api("/notifications/read", { method: "POST", body: JSON.stringify({ ids: [] }) });
+  loadNotifications();
+}
+const unreadCount = computed(() => notifications.value.filter((n) => !n.read).length);
+// 触发描述（与后端 describe_trigger 同义，展示用）
+function schedDesc(s) {
+  const t = JSON.parse(s.trigger_json || "{}");
+  if (t.type === "cron") return `每天 ${String(t.hour).padStart(2, "0")}:${String(t.minute || 0).padStart(2, "0")}`;
+  if (t.type === "interval") return t.minutes != null ? `每隔 ${t.minutes} 分钟` : `每隔 ${t.hours} 小时`;
+  if (t.run_at) return new Date(t.run_at * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return "";
+}
+async function addSchedule() {
+  const { kind, goal, when } = schedForm.value;
+  if (!goal.trim() || !when.trim()) return alert("目标和时间都要填");
+  const r = await api("/schedules", { method: "POST", body: JSON.stringify({ kind, goal, when: `${goal} ${when}` }) });
+  if (r.error) return alert(r.error);
+  schedForm.value = { kind: "task", goal: "", when: "" };
+  loadSchedules();
+}
+async function toggleSched(s) {
+  await api(`/schedules/${s.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !s.enabled }) });
+  loadSchedules();
+}
+async function delSched(id) { await api(`/schedules/${id}`, { method: "DELETE" }); loadSchedules(); }
+
+// 对话流自动滚底（学 chatgpt-web：新消息永远在视野内）
+const chatScroll = ref(null);
+watch(() => thread.value.length, async () => {
+  await nextTick();
+  if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight;
+});
+
 onMounted(() => {
   refresh();
   loadTodos();
-  // 待审批/任务状态自动刷新：否则审批角标不出现，用户只能干等（实测反馈）
-  setInterval(refresh, 5000);
+  loadSchedules();
+  loadNotifications();
+  // 恢复最近会话（多轮上下文连续；任务卡历史在任务中心）
+  api("/chat/latest").then((d) => {
+    if (d && d.conversation_id) {
+      convId.value = d.conversation_id;
+      thread.value = (d.messages || []).map((m) => ({ role: m.role, content: m.content }));
+    }
+  });
+  // 待审批/任务状态/通知自动刷新：否则审批角标与闹钟不出现（实测反馈）
+  setInterval(() => { refresh(); loadNotifications(); }, 5000);
 });
 // 切到待办页时重拉：在首页对话里加的待办否则看不到（实测踩坑）
-watch(tab, (t) => { if (t === "todos") loadTodos(); });
+watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSchedules(); });
 </script>
 
 <template>
   <div class="shell">
     <nav class="side">
       <div class="brand">Aster</div>
-      <button v-for="t in [['home','首页'],['todos','待办'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]":key="t[0]"
+      <button v-for="t in [['home','首页'],['todos','待办'],['sched','定时'],['tasks','任务中心'],['caps','能力中心'],['disc','发现与评估'],['evo','成长与进化'],['settings','设置']]":key="t[0]"
               :class="{ on: tab === t[0] }" @click="tab = t[0]">{{ t[1] }}</button>
+      <!-- 通知铃铛：闹钟/定时任务完成推送（点开看最近通知） -->
+      <div class="bell-wrap">
+        <button class="bell" :class="{ on: notifOpen }" @click="notifOpen = !notifOpen">
+          通知 <span v-if="unreadCount" class="badge">{{ unreadCount }}</span>
+        </button>
+        <div v-if="notifOpen" class="notif-pop">
+          <div class="row spread" style="padding:6px 10px">
+            <b style="font-size:13px">通知</b>
+            <button class="ghost tiny" @click="markAllRead">全部已读</button>
+          </div>
+          <div v-for="n in notifications" :key="n.id" class="notif-item" :class="{ unread: !n.read }">
+            <div class="notif-text">{{ n.text }}</div>
+            <div class="hint">{{ new Date(n.created_at * 1000).toLocaleString() }}</div>
+          </div>
+          <p v-if="!notifications.length" class="empty" style="padding:10px">还没有通知</p>
+        </div>
+      </div>
       <div v-if="sys" class="side-status" :class="{ warn: sys.paused }">
         {{ sys.paused ? "已暂停" : sys.provider_ready ? "运行中" : "模型未配置" }}
         <span v-if="pendingApprovals.length" class="badge">{{ pendingApprovals.length }} 待审批</span>
@@ -285,57 +349,60 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); });
 
     <main>
       <!-- 首页 = 主战场：输入 → 执行流程 → 审批 → 结果，一条流全在这（用户实测反馈重构） -->
-      <section v-if="tab === 'home'">
-        <h1>今天要做点什么？</h1>
-        <textarea v-model="goalText" rows="3" placeholder="描述你的目标，或直接粘贴 GitHub 仓库链接…"
-                  @keydown.meta.enter="submitGoal" @keydown.ctrl.enter="submitGoal" />
-        <div class="row">
-          <button class="primary" @click="submitGoal">发送</button>
-          <span class="hint">⌘/Ctrl + Enter · 对话可追问，任务类输入自动走能力</span>
+      <!-- 首页 = 纯对话（学 chatgpt-web/lobe-chat 三段式：消息流+底部输入+自动滚底） -->
+      <section v-if="tab === 'home'" class="chat-home">
+        <div class="chat-top">
+          <span class="chat-title">对话</span>
+          <span class="hint">任务类输入自动走能力 · 结果以任务卡呈现在流里 · 全量历史在任务中心</span>
           <button v-if="convId" class="ghost" @click="newConversation">新对话</button>
         </div>
-
-        <!-- 对话线程：气泡式多轮（上下文延续） -->
-        <div v-if="thread.length" class="card">
+        <div class="chat-scroll" ref="chatScroll">
+          <div v-if="!thread.length" class="chat-empty">
+            <p>试试：</p>
+            <p>· 粘贴 GitHub 仓库链接，如 https://github.com/asg017/sqlite-vec</p>
+            <p>· 深度调研：MCP 生态 2026 现状</p>
+            <p>· 帮我加个待办：明天整理周报 (A)</p>
+            <p>· 提醒我 30 分钟后休息 · 每天早上 9 点给我热点日报</p>
+          </div>
           <template v-for="(m, i) in thread" :key="i">
-            <div v-if="m.role === 'user'" class="q-bubble">{{ m.content }}</div>
-            <div v-else class="answer-panel" style="margin:8px 0">
-              <div class="answer-head">回答</div>
-              <pre class="result" style="white-space:pre-wrap">{{ m.content }}</pre>
+            <div v-if="m.role === 'user'" class="bub user">{{ m.content }}</div>
+            <div v-else-if="m.role === 'assistant'" class="bub bot md" v-html="mdHtml(m.content)"></div>
+            <!-- 任务卡气泡：状态实时刷新；审批内联（保持"审批不离开首页"） -->
+            <div v-else-if="m.role === 'task' && taskCards[m.id]" class="task-bub">
+              <div class="row spread">
+                <span class="st" :class="taskCards[m.id].status">
+                  {{ taskCards[m.id].status === 'executing' ? '▸ 执行中' :
+                     STATUS_TEXT[taskCards[m.id].status] || taskCards[m.id].status }}
+                </span>
+                <button class="ghost tiny" @click="tab = 'tasks'; toggleDetail(m.id)">详情</button>
+              </div>
+              <div class="task-goal">{{ taskCards[m.id].goal }}</div>
+              <div v-for="a in approvalsFor(m.id)" :key="a.id" class="approval-inline">
+                <span>{{ a.reason }}</span>
+                <span>
+                  <button class="primary tiny" @click="approveAndRetry(a.id, m.id)">批准并继续</button>
+                  <button class="tiny" @click="rejectApproval(a.id)">拒绝</button>
+                </span>
+              </div>
+              <template v-if="isTerminal(taskCards[m.id].status)">
+                <div v-if="taskCards[m.id].result_summary" class="md task-sum"
+                     v-html="mdHtml(String(taskCards[m.id].result_summary).slice(0, 600))"></div>
+                <div class="row" v-if="taskCards[m.id].result_ref">
+                  <a :href="`/api/tasks/${m.id}/file`" download><button class="tiny">下载产物</button></a>
+                </div>
+                <div class="row" v-if="['failed','cancelled','partial'].includes(taskCards[m.id].status)">
+                  <button class="tiny" @click="retryTask(m.id); watchTask(m.id)">重试</button>
+                </div>
+              </template>
             </div>
           </template>
         </div>
-
-        <!-- 当前任务：对话式呈现——问题气泡 → 过程 → 专属回答面板（借鉴 shadcn-chatbot 模式） -->
-        <div v-if="activeTask" class="card answer">
-          <div class="row spread">
-            <span class="st" :class="activeTask.status">{{ STATUS_TEXT[activeTask.status] || activeTask.status }}</span>
-            <button class="ghost" @click="activeTask = null">收起</button>
-          </div>
-          <div class="q-bubble">{{ activeTask.goal }}</div>
-          <!-- 统一结果渲染组件（当前任务/历史/任务中心共用一套） -->
-          <ResultView :task="activeTask" :pending="pendingApprovals"
-                      @approve="approveAndRetry" @reject="(aid) => rejectApproval(aid)" />
-          <div v-if="['failed', 'cancelled', 'partial'].includes(activeTask.status)" class="row">
-            <button @click="retryTask(activeTask.id); watchTask(activeTask.id)">重试</button>
-          </div>
+        <div class="chat-input">
+          <textarea v-model="goalText" rows="2"
+                    placeholder="描述目标 / 提问 / 加待办 / 设提醒…（Enter 发送，Shift+Enter 换行）"
+                    @keydown.enter.exact.prevent="submitGoal"></textarea>
+          <button class="primary" @click="submitGoal">发送</button>
         </div>
-
-        <!-- 历史：就地展开完整卡，不跳任务中心 -->
-        <h2>历史任务</h2>
-        <template v-for="t in homeRecent" :key="t.id">
-          <div class="card task-row" @click="toggleHistory(t.id)">
-            <span class="st" :class="t.status">{{ STATUS_TEXT[t.status] || t.status }}</span>
-            <span class="goal">{{ t.goal.slice(0, 60) }}</span>
-            <span class="time">{{ new Date(t.created_at * 1000).toLocaleTimeString() }}</span>
-          </div>
-          <div v-if="expandedId === t.id && histDetail" class="card">
-            <!-- 历史展开与当前任务同一渲染组件：回答面板/事件卡/输入输出全一致 -->
-            <ResultView :task="histDetail" :pending="pendingApprovals"
-                        @approve="approveAndRetry" @reject="(aid) => rejectApproval(aid)" />
-          </div>
-        </template>
-        <p v-if="!homeRecent.length" class="empty">还没有任务。粘贴一个仓库链接试试，例如 https://github.com/asg017/sqlite-vec</p>
       </section>
 
       <!-- 待办管理：学 todo.txt（自由文本+语法）与 taskwarrior（due 驱动排序） -->
@@ -374,6 +441,37 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); });
           </template>
         </div>
         <p v-if="!todoShown.length" class="empty">没有符合条件的待办</p>
+      </section>
+
+      <!-- 定时：定时任务与闹钟（APScheduler：每天/每隔/一次性三类触发） -->
+      <section v-if="tab === 'sched'">
+        <div class="row spread">
+          <h1>定时</h1>
+          <span class="hint">定时任务到点照常走门禁（L1 需批准）· 闹钟到点推通知</span>
+        </div>
+        <div class="card row">
+          <select v-model="schedForm.kind">
+            <option value="task">定时任务</option>
+            <option value="alarm">闹钟</option>
+          </select>
+          <input v-model="schedForm.goal" style="flex:1"
+                 :placeholder="schedForm.kind === 'task' ? '任务目标，如：给我热点日报' : '提醒内容，如：开会'" />
+          <input v-model="schedForm.when" style="width:220px"
+                 placeholder="时间：每天 9:30 / 每 30 分钟 / 明天 15 点" @keydown.enter="addSchedule" />
+          <button class="primary" @click="addSchedule">添加</button>
+        </div>
+        <div v-for="s in schedules" :key="s.id" class="card task-row">
+          <span class="tag">{{ s.kind === 'task' ? '任务' : '闹钟' }}</span>
+          <span class="goal">{{ s.goal.slice(0, 60) }}</span>
+          <span class="hint">{{ schedDesc(s) }}</span>
+          <span v-if="s.next_run_at" class="hint">下次 {{ new Date(s.next_run_at * 1000).toLocaleString() }}</span>
+          <span v-if="s.last_task_id" class="tag">最近 #{{ s.last_task_id }}</span>
+          <span class="row-actions">
+            <button class="ghost" @click="toggleSched(s)">{{ s.enabled ? '停用' : '启用' }}</button>
+            <button class="ghost danger" @click="delSched(s.id)">删除</button>
+          </span>
+        </div>
+        <p v-if="!schedules.length" class="empty">还没有定时。试试上面加一个"每天 9:30 热点日报"</p>
       </section>
 
       <!-- 任务中心：搜索 + 多选批量 + 行内管理 -->
@@ -562,6 +660,38 @@ body { margin: 0; background: var(--bg); color: var(--text);
 .side-status.warn { color: var(--warn); }
 .badge { background: var(--warn); color: #fff; border-radius: 8px; padding: 0 6px; margin-left: 4px; }
 main { flex: 1; padding: 28px 36px; max-width: 860px; }
+/* 首页对话区：占满视口高三段式（消息流滚动 + 输入常底），学 chatgpt-web */
+.chat-home { display: flex; flex-direction: column; height: calc(100vh - 56px); margin: -28px -36px; padding: 0 36px; }
+.chat-top { display: flex; align-items: center; gap: 12px; padding: 14px 0 10px; border-bottom: 1px solid var(--line); }
+.chat-top .chat-title { font-weight: 700; font-size: 16px; }
+.chat-top .hint { flex: 1; }
+.chat-scroll { flex: 1; overflow-y: auto; padding: 16px 4px; display: flex; flex-direction: column; gap: 10px; }
+.chat-empty { margin: auto; color: var(--dim); text-align: center; }
+.bub { max-width: 76%; padding: 9px 14px; border-radius: 14px; font-size: 14px; white-space: pre-wrap; }
+.bub.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.bub.bot { align-self: flex-start; background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.bub.bot :is(p, ul, ol) { margin: 4px 0; }
+.bub.bot code { background: rgba(127,127,127,.15); border-radius: 4px; padding: 1px 5px; }
+.chat-input { display: flex; gap: 10px; align-items: flex-end; padding: 12px 0 18px; border-top: 1px solid var(--line); }
+.chat-input textarea { flex: 1; resize: none; }
+.task-bub { align-self: flex-start; width: 82%; background: var(--card); border: 1px solid var(--line);
+            border-left: 3px solid var(--accent); border-radius: 10px; padding: 10px 14px; }
+.task-goal { font-weight: 600; margin: 4px 0; }
+.task-sum { font-size: 13px; border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
+.approval-inline { display: flex; justify-content: space-between; gap: 8px; align-items: center;
+                   background: rgba(217,122,6,.08); border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 13px; }
+button.tiny, .tiny { font-size: 12px; padding: 3px 10px; }
+/* 侧栏通知铃铛 */
+.bell-wrap { position: relative; margin-top: auto; }
+.bell { width: 100%; text-align: left; }
+.bell.on { background: var(--bg); }
+.notif-pop { position: absolute; bottom: 36px; left: 0; width: 300px; max-height: 380px; overflow-y: auto;
+             background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+             box-shadow: 0 8px 24px rgba(0,0,0,.12); z-index: 30; }
+.notif-item { padding: 8px 10px; border-top: 1px solid var(--line); }
+.notif-item.unread { background: rgba(49,110,243,.05); }
+.notif-text { font-size: 13px; white-space: pre-wrap; }
+.side-status { margin-top: 0 !important; }
 h1 { font-size: 20px; margin: 0 0 16px; } h2 { font-size: 15px; margin: 20px 0 10px; }
 textarea, input, select { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px;
        background: var(--card); color: var(--text); font: inherit; }

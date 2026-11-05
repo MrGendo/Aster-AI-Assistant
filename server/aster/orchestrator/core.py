@@ -45,6 +45,13 @@ def classify(goal: str) -> str:
         return "mem0_add"
     if re.match(r"^(回忆|你记得|查一下记忆)", goal):
         return "mem0_search"
+    # 定时/闹钟：带时间语义的提醒与周期任务——比待办更具体，先判（无时间的"提醒我"仍归待办）
+    from .. import scheduler as job_sched
+    if (re.match(r"^(帮我|请)?提醒我", goal)
+            and (job_sched.parse_when(goal) or job_sched.looks_periodic(goal))):
+        return "alarm"
+    if job_sched.looks_periodic(goal) and re.search(r"推送|日报|执行|跑|总结|调研|分析|抓取|任务|提醒", goal):
+        return "schedule"
     # 待办：前缀强意图（"待办：X"/"帮我加个待办 X"/"提醒我 X"）；列出用固定短语。
     # 完成勾选故意不做对话路由——口语指代易错位，UI 点击才可靠
     if (re.match(r"^(帮我|请|给我)?(待办|todo)[:：]", goal, re.IGNORECASE)

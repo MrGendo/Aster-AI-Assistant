@@ -1,4 +1,5 @@
 # 单一入口：消息先进分类——任务型建任务（走原执行链），对话型挂会话线程
+import json
 import re
 import time
 
@@ -75,6 +76,20 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
         return {"type": "todo", "reply": _todo_add(message)}
     if intent == "todo_list":
         return {"type": "todo", "reply": _todo_list()}
+    # 闹钟/定时任务：同样轻量，建调度后回执（时间没解析出来时引导用户补时间）
+    if intent in ("alarm", "schedule"):
+        from .. import scheduler as job_sched
+        kind = "alarm" if intent == "alarm" else "task"
+        content = re.sub(r"^(帮我|请)?提醒我[:：，,\s]*", "", message).strip() or message
+        goal = content if kind == "alarm" else message  # 定时任务保留全句（后续分类依赖"日报"等词）
+        row, err = job_sched.create(kind, goal, message)
+        if err:
+            return {"type": "todo", "reply": err + "（例如：提醒我明天 9 点开会）"}
+        tj = json.loads(row["trigger_json"])
+        nxt = (f"，下次 {time.strftime('%m-%d %H:%M', time.localtime(row['next_run_at']))}"
+               if row["next_run_at"] else "")
+        label = "闹钟已设" if kind == "alarm" else "定时任务已建"
+        return {"type": "todo", "reply": f"{label}：{row['goal'][:60]}（{job_sched.describe_trigger(tj)}{nxt}）"}
     if intent != "chat":
         conn = connect()
         try:
@@ -99,6 +114,22 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
 
 async def _run(task_id: int) -> None:
     await orchestrator.execute(task_id)
+
+
+@router.get("/chat/latest")
+def chat_latest() -> dict:
+    """恢复最近会话（首页加载时续聊；无会话返回 null）"""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT id FROM conversations ORDER BY id DESC LIMIT 1").fetchone()
+        if not row:
+            return {"conversation_id": None, "messages": []}
+        msgs = [dict(m) for m in conn.execute(
+            "SELECT role, content FROM messages WHERE conversation_id=? "
+            "ORDER BY id DESC LIMIT 30", (row["id"],)).fetchall()][::-1]
+        return {"conversation_id": row["id"], "messages": msgs}
+    finally:
+        conn.close()
 
 
 @router.get("/chat/{conversation_id}")
