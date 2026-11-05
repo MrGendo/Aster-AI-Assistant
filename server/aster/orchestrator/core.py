@@ -28,6 +28,7 @@ TEMPLATES = {
     "mem0_search": "mem0_memory",
     "repo_quality": "repo_quality",
     "browser": "browser_browse",
+    "deep_research": "deep_research",
 }
 
 
@@ -36,14 +37,20 @@ def classify(goal: str) -> str:
     # 规划执行前缀绝对优先：显式多步协作不许被单能力规则劫持（实测教训）
     if goal.startswith("规划执行：") or goal.startswith("规划执行:"):
         return "planned"
-    # 复合目标连接词：单能力规则遇到它们让路给规划器
-    COMPOSITE = bool(re.search(r"同时|然后|最后|并且|综合|全面调研|分别", goal))
+    # 复合目标连接词：单能力规则遇到它们让路给规划器（"全面调研"已归 deep_research 规则）
+    COMPOSITE = bool(re.search(r"同时|然后|最后|并且|综合|分别", goal))
     if GITHUB_RE.search(goal) and re.search(r"质量|评分", goal) and not COMPOSITE:
         return "repo_quality"
     if re.match(r"^(记住|记一下)", goal):
         return "mem0_add"
     if re.match(r"^(回忆|你记得|查一下记忆)", goal):
         return "mem0_search"
+    # 深度调研：自主联网调研主题出报告——该能力自带研究规划，不拆多步路径。
+    # "全面调研"从复合连接词移出归本规则（本身就是单能力强意图）；带仓库链接/顺序复合仍让路
+    if (re.search(r"深度调研|深入调研|全面调研", goal)
+            and not GITHUB_RE.search(goal)
+            and not re.search(r"同时|然后|再|最后|并且|综合|分别", goal)):
+        return "deep_research"
     URL_RE = re.compile(r"https?://\S+")
     if URL_RE.search(goal) and re.search(r"浏览|打开|截图|看看这个网页", goal):
         return "browser"
@@ -247,7 +254,9 @@ async def execute(task_id: int) -> None:
                 (json.dumps(payload, ensure_ascii=False), int(time.time()), step["id"]),
             )
         result = await asyncio.to_thread(
-            runner.run_capability, cap, task_id, step["id"], payload
+            runner.run_capability, cap, task_id, step["id"], payload,
+            # 深度调研自带多轮检索+写作，普通能力 5 分钟上限对它不够
+            timeout_s=900 if intent == "deep_research" else 300,
         )
         # 结果落盘路径回填任务，详情页/答案卡可加载完整 JSON（事件卡渲染依赖它）
         with tx(conn):
@@ -272,8 +281,11 @@ async def execute(task_id: int) -> None:
             _set_status(conn, task_id, tsm.VERIFYING)
             if ok_verify:
                 summary = _deliver(intent, result.output)
-                # ref 用 runner 的真实落盘路径（_finish 不能再用旧空值覆盖掉它）
-                _finish(conn, task_id, summary=summary, ref=result.output_path or "")
+                # ref 用 runner 的真实落盘路径（_finish 不能再用旧空值覆盖掉它）；
+                # 深度调研的下载件是 markdown 报告本体而非 JSON 明细
+                ref = (result.output.get("report_path")
+                       if intent == "deep_research" else result.output_path) or ""
+                _finish(conn, task_id, summary=summary, ref=ref)
             else:
                 _fail(conn, task_id, "结果未通过结构校验（关键字段缺失），已保留原始输出供查看")
         elif result.pending_approval:
@@ -583,6 +595,11 @@ def _build_payload(intent: str, goal: str) -> dict:
         return {"text": text or goal}
     if intent == "mem0_add":
         return {"action": "add", "text": re.sub(r"^(记住|记一下)[:：，,\s]*", "", goal)}
+    if intent == "deep_research":
+        # 剥掉指令词取纯主题（如"帮我深度调研：Rust 生态趋势"→"Rust 生态趋势"）
+        topic = re.sub(r"^(帮我|请)?(对我|对|关于)?(做|进行|来)?(一次|一个)?"
+                       r"(深度|深入|全面)?调研[:：，,\s]*", "", goal).strip()
+        return {"topic": topic or goal}
     if intent == "mem0_search":
         return {"action": "search",
                 "query": re.sub(r"^(回忆|你记得|查一下记忆)(一下)?[:：，,\s]*", "", goal)}
@@ -612,6 +629,9 @@ def _verify(intent: str, output: dict) -> bool:
         return "score" in output or "error" in output
     if intent == "browser":
         return "result" in output
+    if intent == "deep_research":
+        # 报告文件与引用来源是证据底线：缺来源的报告无法核验，不算通过
+        return bool(output.get("report_path")) and bool(output.get("sources"))
     return True
 
 
@@ -638,6 +658,12 @@ def _deliver(intent: str, output: dict) -> str:
         return "\n".join(lines)
     if intent == "browser":
         return f"[浏览器] {output.get('result', '')[:800]}"
+    if intent == "deep_research":
+        # 摘要先行 + 来源数（PRD 证据分级：报告可下载，来源可核验）
+        srcs = output.get("sources") or []
+        return (f"{output.get('summary', '调研完成')}\n\n"
+                f"（全文报告可下载：{output.get('report_path', '').split('/')[-1]}；"
+                f"引用来源 {len(srcs)} 条）")
     if intent == "repo_analysis":
         v = output.get("verified", {})
         inf = output.get("inferred", {})

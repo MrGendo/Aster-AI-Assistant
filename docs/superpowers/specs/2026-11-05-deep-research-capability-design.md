@@ -20,6 +20,12 @@
 5. 普通 research_report 约 2-3 分钟；deep 模式约 5 分钟/$0.4——首版不启用 deep
 6. duckduckgo 检索器需额外 `pip install duckduckgo-search`
 
+**执行期实测补充陷阱（文档未写，安装后才暴露）**：
+- 检索器注册表**急切导入全部检索器**（含 MCP）：即使只用 duckduckgo，也必须装 `langchain-mcp-adapters`，否则模块级 ImportError 直接崩
+- duckduckgo-search 新版已拆包：检索实现要 `pip install ddgs`（文档仍写 duckduckgo-search，属其文档滞后）
+- 其安装会把 mcp 从 2.x 降到 1.x，连带打断 arize-phoenix 的 pytest 插件导入链（phoenix→pydantic_ai→fastmcp）——与本项目测试无关，pytest.ini 里 `-p no:phoenix` 规避；browser-use 的 mcp==2.1.1 pin 仍报警告但 import 与运行正常
+- **GLM glm-4.7 默认带 thinking 块**：ChatAnthropic 返回 content 为 `[thinking, text]` 列表，gpt-researcher 全按纯字符串处理（choose_agent 的正则直接 TypeError）。工人在导入前用压平版 ChatAnthropic 替换（只拼接 text 块，丢弃 thinking）——与其"对 GPT 优化"的官方警告同源，属模型形态差异
+
 ## 二、集成方案
 
 **新能力**：`deep_research`（子进程工人，JSON stdin→stdout 协议，与其他 10 个能力同构）

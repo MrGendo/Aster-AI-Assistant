@@ -128,6 +128,21 @@ BUILTIN = [
         },
     },
     {
+        "name": "deep_research",
+        "kind": "task",
+        "risk_level": "L1",  # 联网检索 + 付费 token 消耗，默认需确认
+        "entry": "deep_research/run.py",
+        "descriptor": {
+            "name": "深度调研（gpt-researcher）",
+            "purpose": "对任意主题自主联网调研：生成研究问题→检索→抓取→去重→综合，产出带引用来源的中文报告",
+            "not_for": "基于已有任务素材的汇总（用 report）；单页抓取（用 web_fetch）；仓库分析（用 repo_analysis）",
+            "input": "{\"topic\": \"调研主题\", \"max_words\": 1500}",
+            "output": "report_path（markdown 报告）+ sources 引用来源列表",
+            "cost": "约 2-5 分钟；每次调研多轮 LLM 调用 + 检索请求",
+            "limits": "duckduckgo 免费检索；GLM（anthropic 路由）+ 本地 bge 嵌入；15 分钟超时",
+        },
+    },
+    {
         "name": "news_fetch",        "kind": "tool",
         "risk_level": "L0",
         "entry": "news_fetch/run.py",

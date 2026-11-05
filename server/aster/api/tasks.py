@@ -100,6 +100,11 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
                 "UPDATE tasks SET status=?, error=NULL, cancel_requested=0, updated_at=? WHERE id=?",
                 (tsm_mod.PENDING, int(__import__("time").time()), task_id),
             )
+            # 删步骤前先解绑 runs 引用（网关拦截也落 runs.step_id，直接删会撞外键——与 DELETE 任务同款坑）
+            conn.execute(
+                "UPDATE runs SET step_id=NULL WHERE step_id IN "
+                "(SELECT id FROM task_steps WHERE task_id=?)", (task_id,),
+            )
             conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
             goal = conn.execute("SELECT goal FROM tasks WHERE id=?", (task_id,)).fetchone()["goal"]
         bg.add_task(_recreate_and_run, task_id, goal)
