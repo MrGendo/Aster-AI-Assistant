@@ -37,18 +37,44 @@ const levelOf = (seq, cache = {}) => {
 };
 
 const nodes = computed(() => {
-  const byLevel = {};
+  // 汇聚节点垂直居中于前驱（用户反馈：依赖 1/2/3 的步骤4应夹在中间行，而非与步骤1同行）
+  // 简化重心法：第 0 层顺序排；其余层 y=前驱 y 均值；层内按 y 排序后向下推开避免重叠
+  const stepBySeq = Object.fromEntries(props.steps.map((s) => [s.seq, s]));
+  const levels = {};
   for (const s of props.steps) {
     const lv = levelOf(s.seq, {});
-    byLevel[lv] = (byLevel[lv] || 0);
-    const idx = byLevel[lv]++;
-    s._x = 40 + lv * 230;
-    s._y = 30 + idx * 110;
+    (levels[lv] = levels[lv] || []).push(s);
   }
+  const GAP_Y = 110;
+  for (const lv of Object.keys(levels).map(Number).sort((a, b) => a - b)) {
+    const group = levels[lv];
+    for (const s of group) {
+      const deps = parseDeps(s).filter((d) => stepBySeq[d] && stepBySeq[d]._y !== undefined);
+      s._y = deps.length
+        ? deps.reduce((sum, d) => sum + stepBySeq[d]._y, 0) / deps.length
+        : 30 + group.indexOf(s) * GAP_Y;
+    }
+    // 层内防重叠：按 y 排序，从上往下保证最小间距（父层已定型，单次下推即可）
+    group.sort((a, b) => a._y - b._y);
+    for (let i = 1; i < group.length; i++) {
+      if (group[i]._y - group[i - 1]._y < GAP_Y) group[i]._y = group[i - 1]._y + GAP_Y;
+    }
+  }
+  for (const s of props.steps) {
+    s._x = 40 + levelOf(s.seq, {}) * 230;
+  }
+  // 节点标时长（学 dsh-maze 时长胶囊约定）：3 分钟与 0.2 秒的步骤一眼可辨
+  const durOf = (s) =>
+    s.started_at && s.finished_at
+      ? `${((s.finished_at - s.started_at) || 0).toFixed(1)}s`
+      : "";
   return props.steps.map((s) => ({
     id: String(s.seq),
     position: { x: s._x, y: s._y },
-    data: { label: `步骤${s.seq} ${s.step_desc.slice(0, 18)}`, status: s.status, seq: s.seq },
+    data: {
+      label: `步骤${s.seq} ${s.step_desc.slice(0, 18)}`,
+      dur: durOf(s), status: s.status, seq: s.seq,
+    },
     style: {
       border: `2px solid ${STATUS_COLOR[s.status] || "#86868b"}`,
       borderRadius: "10px", padding: "6px 10px", fontSize: "12px",
@@ -68,11 +94,11 @@ const edges = computed(() => {
         // 对象形式显式给颜色：枚举简写的默认 markerColor 曾渲染不出箭头（实测反馈）
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: "#5a5a60",
+          color: "#1d1d1f",
           width: 22,
           height: 22,
         },
-        style: { stroke: "#5a5a60", strokeWidth: 1.8 },
+        style: { stroke: "#4a4a50", strokeWidth: 2 },
       });
     }
   }
@@ -94,6 +120,7 @@ const edges = computed(() => {
             <Handle type="target" :position="Position.Left" />
             <span class="dot" :style="{ background: STATUS_COLOR[data.status] }"></span>
             {{ data.label }}
+            <span v-if="data.dur" class="dur">{{ data.dur }}</span>
             <Handle type="source" :position="Position.Right" />
           </div>
         </template>
@@ -117,5 +144,6 @@ const edges = computed(() => {
                                     background: #5a5a60; border: none; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
        margin-right: 6px; background: #86868b; }
+.dur { float: right; color: #86868b; font-size: 11px; }
 .hint { color: var(--dim, #86868b); font-size: 12px; margin: 6px 10px; }
 </style>

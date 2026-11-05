@@ -47,9 +47,22 @@ def create_app() -> "FastAPI":
     app.include_router(chat.router, prefix="/api")
 
     # 前端产物：构建后由服务直接托管（API 路由先注册，静态挂载兜底其余路径）
-    from fastapi.staticfiles import StaticFiles
+    from starlette.staticfiles import StaticFiles
     from ..config import ROOT
     dist = ROOT / "web" / "dist"
+
+    # 缓存策略（vite 部署标准）：index.html 必须每次回源校验，否则浏览器会
+    # 启发式缓存旧页面、引用已被新构建删除的旧哈希资源——DAG 箭头"改了却
+    # 看不到"两次返工的直接原因；哈希资源内容变名字变，可永久缓存
+    class CachedStatic(StaticFiles):
+        def file_response(self, *args, **kwargs):
+            resp = super().file_response(*args, **kwargs)
+            immutable = "public, max-age=31536000, immutable" if "/assets/" in str(
+                getattr(resp, "path", "")
+            ) else "no-cache"
+            resp.headers["Cache-Control"] = immutable
+            return resp
+
     if dist.exists():
-        app.mount("/", StaticFiles(directory=dist, html=True), name="web")
+        app.mount("/", CachedStatic(directory=dist, html=True), name="web")
     return app
