@@ -92,13 +92,20 @@ def classify(goal: str) -> str:
             answer = provider.chat(
                 [{"role": "user", "content": goal}],
                 system=(
-                    "你是任务意图分类器。只输出以下之一，不要解释：\n"
-                    "repo_analysis（分析 GitHub 仓库）/ text_stats（文本统计）/ chat（其他所有）"
+                    "你是任务意图分类器。只输出以下标签之一，不要解释：\n"
+                    "repo_analysis（分析 GitHub 仓库）/ repo_quality（仓库质量评分）/ "
+                    "text_stats（文本统计）/ hot_news（热点整理成日报）/ "
+                    "report（把素材写成报告）/ deep_research（联网深度调研某主题）/ "
+                    "mem0_add（记住某事）/ mem0_search（查询记忆）/ "
+                    "browser（浏览某网页）/ planned（明确的多步复合目标）/ "
+                    "chat（普通对话，其他所有）"
                 ),
                 max_tokens=20,
             )
             label = answer.strip().lower()
-            if label in ("repo_analysis", "text_stats", "chat"):
+            if label in ("repo_analysis", "repo_quality", "text_stats", "hot_news",
+                         "report", "deep_research", "mem0_add", "mem0_search",
+                         "browser", "planned", "chat"):
                 return label
         except Exception as e:  # 模型失败不阻塞：回落 chat
             log.warning("意图分类模型调用失败，回落 chat: %s", e)
@@ -189,7 +196,7 @@ async def execute(task_id: int) -> None:
                     # 交付终检（P0 质量门，report 专属分支同通用路径待遇）
                     if provider.available():
                         gate = await asyncio.to_thread(
-                            _llm_verify, DELIVERY_VERIFY["report"], task["goal"],
+                            _llm_verify, conn, task_id, DELIVERY_VERIFY["report"], task["goal"],
                             {"summary": summary[:3000]})
                         if gate.ok:
                             summary += "\n\n✓ 已通过独立评审（结论有据/来源可核验/无编造）"
@@ -327,12 +334,15 @@ async def execute(task_id: int) -> None:
             _set_status(conn, task_id, tsm.VERIFYING)
             if ok_verify:
                 summary = _deliver(intent, result.output)
+                # 子进程能力的美元成本入账（deep_research 回报 costs；其余能力为 0）
+                if isinstance(result.output.get("costs"), (int, float)):
+                    _add_usage(conn, task_id, usd=float(result.output["costs"]))
                 # 交付终检（P0 质量门）：报告/调研/热点三类过独立评审——
                 # 通过标 completed+尾注；未过如实降 partial，不伪装成功（PRD 未验证不显示成功）
                 crit = DELIVERY_VERIFY.get(intent)
                 if crit and provider.available():
                     gate = await asyncio.to_thread(
-                        _llm_verify, crit, task["goal"],
+                        _llm_verify, conn, task_id, crit, task["goal"],
                         {"summary": summary[:3000],
                          "sources_n": len(result.output.get("sources") or [])})
                     if gate.ok:
@@ -378,7 +388,7 @@ async def _execute_planned(conn, task) -> bool | None:
 
     goal = task["goal"].removeprefix("规划执行：").removeprefix("规划执行:")
     _set_status(conn, task["id"], tsm.PLANNING)
-    steps = await asyncio.to_thread(planner_mod.make_plan, conn, goal)
+    steps = await asyncio.to_thread(planner_mod.make_plan, conn, goal, task["id"])
     if not steps:
         log.info("任务 %s 规划失败，回退对话路径", task["id"])
         return False
@@ -440,10 +450,10 @@ async def _execute_planned(conn, task) -> bool | None:
             payload[k] = re.sub(r"\$(\d+)\.(\w+)", _resolve, str(v)) if isinstance(v, str) \
                 else (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
         if st["capability"] == "llm_verify":
-            return await asyncio.to_thread(_llm_verify, st.get("verify", "输出质量合格"),
-                                           goal, outputs)
+            return await asyncio.to_thread(_llm_verify, conn, task["id"],
+                                           st.get("verify", "输出质量合格"), goal, outputs)
         if st["capability"] == "llm_task":
-            return await asyncio.to_thread(_llm_task, payload)
+            return await asyncio.to_thread(_llm_task, conn, task["id"], payload)
 
         # 候选链执行（能力→fallback 接管）；on_fail=retry 时整链重试一次
         async def _attempt() -> "runner.RunResult":
@@ -475,6 +485,26 @@ async def _execute_planned(conn, task) -> bool | None:
                         (task["id"],)).fetchone()[0]:
             _set_status(conn, task["id"], tsm.CANCELLED)
             return True
+        # 成本护栏（失控闸三）：每批执行前检查，超预算诚实熔断
+        over = _budget_exceeded(conn, task["id"])
+        if over:
+            _fail(conn, task["id"], over)
+            from .. import scheduler as job_sched
+            job_sched._notify("task_done", f"任务 #{task['id']} {over}", task["id"])
+            return True
+        # 条件步骤（run_if）：依赖已齐时求值，为假标 skipped 不执行不阻断
+        for st in list(remaining.values()):
+            cond = st.get("run_if")
+            if cond and _deps_done(st):
+                if _eval_run_if(str(cond), outputs) is False:
+                    finished.add(st["seq"])
+                    srow = row_by_seq[st["seq"]]
+                    with tx(conn):
+                        conn.execute(
+                            "UPDATE task_steps SET status='skipped', error=?, finished_at=? "
+                            "WHERE id=?", (f"run_if 不满足：{cond}", int(time.time()), srow["id"]))
+                    log.info("任务 %s 步骤 %s 条件不满足跳过：%s", task["id"], st["seq"], cond)
+                    remaining.pop(st["seq"])
         # 就绪集：依赖全部完成的步骤，按并发上限切片并行
         ready = [st for st in remaining.values() if _deps_done(st)]
         if not ready:
@@ -524,6 +554,10 @@ async def _execute_planned(conn, task) -> bool | None:
             with tx(conn):
                 conn.execute("UPDATE task_steps SET status='failed', error=?, finished_at=? "
                              "WHERE id=?", (reason, int(time.time()), row["id"]))
+            # 重规划本身也烧 token：超预算直接收尾，不给失控任务续命
+            if _budget_exceeded(conn, task["id"]):
+                _fail(conn, task["id"], f"步骤 {st['seq']} 失败且已超预算：{reason}")
+                return True
             if not replanned:
                 replanned = True
                 done_list = [{"seq": s["seq"], "desc": s.get("desc", ""),
@@ -533,7 +567,7 @@ async def _execute_planned(conn, task) -> bool | None:
                 new_steps = await asyncio.to_thread(
                     planner_mod.replan, conn, goal, done_list,
                     {"seq": st["seq"], "desc": st.get("desc", ""), "error": reason},
-                    list(remaining.values()), next_seq)
+                    list(remaining.values()), next_seq, task["id"])
                 if new_steps:
                     with tx(conn):
                         for nst in new_steps:
@@ -657,33 +691,96 @@ def _enrich_hot_news(output: dict, output_path: str = "") -> dict:
     return output
 
 
-def _llm_task(payload: dict) -> "runner.RunResult":
+def _eval_run_if(cond: str, outs: dict) -> bool | None:
+    """run_if 求值：$N.key 真值 / == / != / contains 字面值。
+    语法非法返回 None（校验层已挡，这里兜底当无条件执行）。"""
+    from . import planner as planner_mod
+    m = planner_mod.RUN_IF_RE.match(cond.strip())
+    if not m:
+        return None
+    n, key, op, lit = int(m.group(1)), m.group(2), m.group(3), (m.group(4) or "")
+    val = outs.get(n, {}).get(key)
+    sval = (json.dumps(val, ensure_ascii=False) if isinstance(val, (dict, list))
+            else str(val))
+    if not op:
+        return bool(val) and sval not in ("None", "（上游输出缺失）")
+    lit = lit.strip().strip("'\"")
+    return {"==": sval == lit, "!=": sval != lit,
+            "contains": lit in sval}.get(op, True)
+
+
+# ---------- 成本护栏（设计：2026-11-05-batch-hardening §2） ----------
+def _budgets(conn: sqlite3.Connection) -> tuple[int, float]:
+    """预算阈值（settings 可调）：token 与美元双闸。默认值取保守档"""
+    def _int(key, d):
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        try:
+            return int(row["value"]) if row else d
+        except (TypeError, ValueError):
+            return d
+    def _float(key, d):
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        try:
+            return float(row["value"]) if row else d
+        except (TypeError, ValueError):
+            return d
+    return _int("budget.max_tokens", 300000), _float("budget.max_cost_usd", 1.0)
+
+
+def _add_usage(conn: sqlite3.Connection, task_id: int,
+               tokens: int = 0, usd: float = 0.0) -> None:
+    """任务用量记账（线程安全：自开短事务累加）"""
+    if not task_id or (not tokens and not usd):
+        return
+    with tx(conn):
+        conn.execute("UPDATE tasks SET tokens_used=tokens_used+?, cost_usd=cost_usd+? "
+                     "WHERE id=?", (tokens, usd, task_id))
+
+
+def _budget_exceeded(conn: sqlite3.Connection, task_id: int) -> str | None:
+    """超预算返回可展示的熔断原因，未超返回 None"""
+    row = conn.execute("SELECT tokens_used, cost_usd FROM tasks WHERE id=?",
+                       (task_id,)).fetchone()
+    if not row:
+        return None
+    max_tok, max_usd = _budgets(conn)
+    if row["tokens_used"] > max_tok:
+        return f"预算熔断：本任务已用 {row['tokens_used']} tokens（上限 {max_tok}）"
+    if row["cost_usd"] > max_usd:
+        return f"预算熔断：本任务已耗 ${row['cost_usd']:.2f}（上限 ${max_usd:.2f}）"
+    return None
+
+
+def _llm_task(conn: sqlite3.Connection, task_id: int, payload: dict) -> "runner.RunResult":
     """通用文本加工步：prompt 作系统指令，text 作待加工内容"""
     from ..runtime.runner import RunResult
     try:
         text = payload.get("text", "")
         if isinstance(text, (dict, list)):
             text = json.dumps(text, ensure_ascii=False)
-        ans = provider.chat(
+        ans, used = provider.chat_with_usage(
             [{"role": "user", "content": str(text)[:12000]}],
             system=str(payload.get("prompt") or "整理要点，输出简洁中文"),
         )
+        _add_usage(conn, task_id, tokens=used)
         return RunResult(bool(ans.strip()), 0, {"text": ans.strip()})
     except Exception as e:
         return RunResult(False, 0, {}, f"文本加工失败：{e}")
 
 
-def _llm_verify(criteria: str, goal: str, outputs: dict) -> "runner.RunResult":
+def _llm_verify(conn: sqlite3.Connection, task_id: int, criteria: str,
+                goal: str, outputs: dict) -> "runner.RunResult":
     """评审步（PRD §7.5）：LLM 按预设标准独立检查，不通过即失败——不伪装成功"""
     from ..runtime.runner import RunResult
     try:
-        raw = provider.chat(
+        raw, used = provider.chat_with_usage(
             [{"role": "user",
               "content": f"目标：{goal}\n上游产出：{json.dumps(outputs, ensure_ascii=False)[:6000]}"}],
             system=f"你是独立评审。按标准判断产出是否合格：{criteria}\n"
                    f'只输出 JSON：{{"pass": true/false, "reason": "理由"}}',
             max_tokens=300,
         )
+        _add_usage(conn, task_id, tokens=used)
         d = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
         ok = bool(d.get("pass"))
         return RunResult(ok, 0, {"pass": ok, "reason": d.get("reason", "")},
@@ -815,6 +912,37 @@ def _finish(conn, task_id: int, summary: str, ref: str = "") -> None:
             "UPDATE tasks SET result_summary=?, result_ref=?, updated_at=? WHERE id=?",
             (summary, ref or None, int(time.time()), task_id),
         )
+    _distill_memory(conn, task_id, summary)
+
+
+def _distill_memory(conn: sqlite3.Connection, task_id: int, summary: str) -> None:
+    """P1 记忆蒸馏：任务结论回流 mem0（"跑过即学会"，此前结论只躺在任务库）。
+    仅任务型（chat 不蒸）、可经 memory.distill=0 关闭；任何失败静默降级不影响交付。"""
+    try:
+        row = conn.execute("SELECT intent, goal FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row or row["intent"] == "chat" or not summary or len(summary) < 30:
+            return
+        s = conn.execute("SELECT value FROM settings WHERE key='memory.distill'").fetchone()
+        if s and s["value"] == "0":
+            return
+        cap = registry.get_active(conn, "mem0_memory")
+        if not cap:
+            return
+        fact, used = provider.chat_with_usage(
+            [{"role": "user",
+              "content": f"目标：{row['goal'][:200]}\n结论：{summary[:1500]}"}],
+            system="把任务目标与结论蒸馏成一条不超过 120 字的中文事实句（关键数字保留，"
+                   "不带评价与推测，之后可用语义检索召回）。只输出这句句子。",
+            max_tokens=200,
+        )
+        _add_usage(conn, task_id, tokens=used)
+        if fact.strip():
+            from ..runtime import runner as runner_mod
+            runner_mod.run_capability(cap, task_id, None,
+                                      {"action": "add", "text": fact.strip()}, timeout_s=90)
+            log.info("任务 %s 结论已蒸馏入记忆", task_id)
+    except Exception as e:
+        log.info("任务 %s 记忆蒸馏降级跳过: %s", task_id, e)
 
 
 def _fail(conn, task_id: int, error: str) -> None:

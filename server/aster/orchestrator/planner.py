@@ -12,16 +12,21 @@ log = get_logger("planner")
 
 MAX_STEPS = 6  # 失控闸一：步数上限（PRD §7.6）
 
+# run_if 条件语法：$N.key（真值）/ == / != / contains 字面值（P1 条件步骤）
+RUN_IF_RE = re.compile(r"^\$(\d+)\.(\w+)(?:\s*(==|!=|contains)\s*(.+))?$")
+
 PLAN_PROMPT = """你是任务规划器。基于目标与可用能力清单，产出多步协作计划。
 只输出 JSON：{{"steps":[{{"seq":1,"capability":"能力名","desc":"这步做什么",
  "input":{{"键":"字面值 或 $步骤序号.输出键"}},"output_key":"本步产出的键名",
  "fallback":["备用能力名"],"on_fail":"abort|skip|retry",
+ "run_if":"$前步序号.输出键 == 字面值（可选，条件不满足自动跳过该步）",
  "verify":"通过标准（llm_verify 步必填）"}}]}}
 规则：只使用清单内的能力；每步必须声明 output_key；input 引用格式为 $步骤序号.输出键，
 且输出键必须是被引用步声明的 output_key（引用整份输出就用那步的 output_key）；不超过 {n} 步；
 简单目标用单步；无法用清单能力完成的部分不要编造步骤。
 on_fail 策略：核心产出步骤用 abort（失败终止）；富化/评分等辅助步骤用 skip（失败跳过不阻断）；
 网络类不稳定步骤可用 retry（失败重试一次）。
+run_if 用于"上游结果不同走不同分支"（如 $1.found == 否 则跳过深加工）；不需要条件就不填。
 质量门：产出报告/综合结论/对外引用数据的步骤之后，必须跟一个 llm_verify 评审步
 （capability 填 llm_verify，verify 写明基于用户目标的通过标准，input 引用该步产出）。
 目标：{goal}
@@ -77,6 +82,9 @@ def validate_plan(plan: dict, conn: sqlite3.Connection,
         raw_fail = str(st.get("on_fail") or "abort")
         st["on_fail"] = ("skip" if "skip" in raw_fail
                          else "retry" if "retry" in raw_fail else "abort")
+        # run_if 条件语法硬校验：非法条件在计划期就拒（运行时才炸会浪费整轮执行）
+        if st.get("run_if") and not RUN_IF_RE.match(str(st["run_if"]).strip()):
+            return []
         # 输入引用：$N.key 必须指向更早步骤且键名须为该步声明的 output_key
         for v in (st.get("input") or {}).values():
             m = re.match(r"^\$(\d+)\.(\w+)$", str(v))
@@ -89,12 +97,13 @@ def validate_plan(plan: dict, conn: sqlite3.Connection,
     return checked
 
 
-def make_plan(conn: sqlite3.Connection, goal: str) -> list[dict] | None:
+def make_plan(conn: sqlite3.Connection, goal: str,
+               task_id: int | None = None) -> list[dict] | None:
     """LLM 生成计划 → 硬校验 → 合法步骤列表；任何失败返回 None（调用方走模板）"""
     if not provider.available():
         return None
     try:
-        raw = provider.chat(
+        raw, used = provider.chat_with_usage(
             [{"role": "user", "content": goal}],
             system=PLAN_PROMPT.format(n=MAX_STEPS, goal=goal, caps=_cap_lines(conn)),
             max_tokens=1200,
@@ -104,18 +113,22 @@ def make_plan(conn: sqlite3.Connection, goal: str) -> list[dict] | None:
         log.info("计划生成失败（将回退模板）: %s", e)
         return None
     steps = validate_plan(plan, conn)
+    if steps and task_id and used:
+        from ..orchestrator.core import _add_usage
+        _add_usage(conn, task_id, tokens=used)
     return steps or None
 
 
 def replan(conn: sqlite3.Connection, goal: str, done: list[dict],
-           failed: dict, remaining: list[dict], next_seq: int) -> list[dict] | None:
+           failed: dict, remaining: list[dict], next_seq: int,
+           task_id: int | None = None) -> list[dict] | None:
     """重规划：失败后基于已完成产出生成剩余步骤。新步 seq 从 next_seq 续编（防撞号），
     引用已完成步用原 seq。done 项形如 {"seq","desc","keys":[输出键]}；失败返回 None。"""
     if not provider.available():
         return None
     done_lines = [f"{d['seq']}: {d['desc']} → 可引用键 {','.join(d['keys'])}" for d in done]
     try:
-        raw = provider.chat(
+        raw, used = provider.chat_with_usage(
             [{"role": "user", "content": goal}],
             system=REPLAN_PROMPT.format(
                 n=MAX_STEPS, next_seq=next_seq, goal=goal,
@@ -136,6 +149,9 @@ def replan(conn: sqlite3.Connection, goal: str, done: list[dict],
         return None
     known = {d["seq"]: set(d["keys"]) for d in done}
     steps = validate_plan(plan, conn, known_keys=known)
+    if task_id and used:
+        from ..orchestrator.core import _add_usage
+        _add_usage(conn, task_id, tokens=used)
     if not steps:
         # 拒因留痕：没有它只能盲猜 LLM 违了哪条契约
         log.info("重规划被硬校验拒绝，原始计划：%s", json.dumps(plan, ensure_ascii=False)[:500])

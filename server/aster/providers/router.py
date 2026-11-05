@@ -52,6 +52,12 @@ def available() -> bool:
 
 def chat(messages: list[dict], system: str | None = None, max_tokens: int = 2048) -> str:
     """单轮补全（Phase 1 够用：意图理解与交付生成都是一问一答）"""
+    return chat_with_usage(messages, system, max_tokens)[0]
+
+
+def chat_with_usage(messages: list[dict], system: str | None = None,
+                    max_tokens: int = 2048) -> tuple[str, int]:
+    """带 token 用量的补全（成本护栏记账用）：返回 (文本, input+output tokens)"""
     import anthropic
 
     cfg = provider_config()
@@ -62,4 +68,5 @@ def chat(messages: list[dict], system: str | None = None, max_tokens: int = 2048
         system=system or "",
         messages=messages,
     )
-    return "".join(b.text for b in resp.content if b.type == "text")
+    used = (resp.usage.input_tokens + resp.usage.output_tokens) if resp.usage else 0
+    return "".join(b.text for b in resp.content if b.type == "text"), used
