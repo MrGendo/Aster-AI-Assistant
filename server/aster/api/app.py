@@ -3,7 +3,7 @@ from ..db import connect, migrate
 from ..gateway import core as gateway
 from ..providers import router as provider
 from ..runtime import registry
-from . import caps, discovery, evolution, memories, system, tasks
+from . import caps, chat, discovery, evolution, memories, system, tasks
 
 
 def create_app() -> "FastAPI":
@@ -44,6 +44,7 @@ def create_app() -> "FastAPI":
     app.include_router(system.router, prefix="/api")
     app.include_router(discovery.router, prefix="/api")
     app.include_router(evolution.router, prefix="/api")
+    app.include_router(chat.router, prefix="/api")
 
     # 前端产物：构建后由服务直接托管（API 路由先注册，静态挂载兜底其余路径）
     from fastapi.staticfiles import StaticFiles

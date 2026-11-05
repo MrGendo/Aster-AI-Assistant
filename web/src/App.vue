@@ -12,8 +12,10 @@ const sys = ref(null);
 const goalText = ref("");
 const detail = ref(null);
 const runningTask = ref(null);
-// 首页对话式回显：提交后就地展示执行状态与最终回答（PRD §10.4/§10.3）
-const activeTask = ref(null);
+// 多轮对话线程（与任务卡并存：任务型输入走任务链，对话型挂线程）
+const convId = ref(null);
+const thread = ref([]);
+function newConversation() { convId.value = null; thread.value = []; }
 // 任务中心就地展开 + 行内管理 + 搜索/批量
 const detailId = ref(null);
 const searchQuery = ref("");
@@ -144,12 +146,18 @@ async function archiveCand(id) { await api(`/candidates/${id}/archive`, { method
 async function submitGoal() {
   const goal = goalText.value.trim();
   if (!goal) return;
-  const r = await api("/tasks", { method: "POST", body: JSON.stringify({ goal }) });
-  if (r.id) {
-    goalText.value = "";
+  goalText.value = "";
+  // 单一入口：服务端分类——任务型建任务卡，对话型进线程（追问带上下文）
+  const r = await api("/chat", { method: "POST", body: JSON.stringify({ message: goal, conversation_id: convId.value || undefined }) });
+  if (r.type === "task") {
     activeTask.value = { id: r.id, goal, status: "pending" };
     await refresh();
     watchTask(r.id);
+  } else if (r.type === "chat") {
+    convId.value = r.conversation_id;
+    thread.value.push({ role: "user", content: goal }, { role: "assistant", content: r.reply });
+  } else {
+    activeTask.value = { goal, status: "failed", error: r.error || "发送失败" };
   }
 }
 
@@ -226,8 +234,20 @@ onMounted(() => {
         <textarea v-model="goalText" rows="3" placeholder="描述你的目标，或直接粘贴 GitHub 仓库链接…"
                   @keydown.meta.enter="submitGoal" @keydown.ctrl.enter="submitGoal" />
         <div class="row">
-          <button class="primary" @click="submitGoal">开始任务</button>
-          <span class="hint">⌘/Ctrl + Enter 发送</span>
+          <button class="primary" @click="submitGoal">发送</button>
+          <span class="hint">⌘/Ctrl + Enter · 对话可追问，任务类输入自动走能力</span>
+          <button v-if="convId" class="ghost" @click="newConversation">新对话</button>
+        </div>
+
+        <!-- 对话线程：气泡式多轮（上下文延续） -->
+        <div v-if="thread.length" class="card">
+          <template v-for="(m, i) in thread" :key="i">
+            <div v-if="m.role === 'user'" class="q-bubble">{{ m.content }}</div>
+            <div v-else class="answer-panel" style="margin:8px 0">
+              <div class="answer-head">回答</div>
+              <pre class="result" style="white-space:pre-wrap">{{ m.content }}</pre>
+            </div>
+          </template>
         </div>
 
         <!-- 当前任务：对话式呈现——问题气泡 → 过程 → 专属回答面板（借鉴 shadcn-chatbot 模式） -->
