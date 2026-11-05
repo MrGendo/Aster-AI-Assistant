@@ -2,7 +2,7 @@
 // DAG 调用图：任务的步骤依赖关系可视化（vue-flow 渲染）
 // 节点=步骤（状态着色），边=数据流依赖（depends_on）；点击节点展开输入输出
 import { computed, ref } from "vue";
-import { MarkerType, VueFlow } from "@vue-flow/core";
+import { Handle, MarkerType, Position, VueFlow } from "@vue-flow/core";
 import "@vue-flow/core/dist/style.css";
 import "@vue-flow/core/dist/theme-default.css";
 
@@ -91,8 +91,10 @@ const edges = computed(() => {
         <template #node-default="{ id, data }">
           <div class="dag-node" :style="{ borderColor: STATUS_COLOR[data.status] }"
                :title="`状态：${data.status}`">
+            <Handle type="target" :position="Position.Left" />
             <span class="dot" :style="{ background: STATUS_COLOR[data.status] }"></span>
             {{ data.label }}
+            <Handle type="source" :position="Position.Right" />
           </div>
         </template>
       </VueFlow>
@@ -108,7 +110,11 @@ const edges = computed(() => {
 .dag-head:hover { background: var(--bg, #f7f7f8); }
 .dag-canvas { height: 260px; border-top: 1px solid var(--line, #e5e5e8); }
 .dag-node { padding: 6px 10px; font-size: 12px; border: 2px solid #86868b;
-            border-radius: 10px; background: #fff; color: #1d1d1f; width: 170px; }
+            border-radius: 10px; background: #fff; color: #1d1d1f; width: 170px;
+            position: relative; }
+/* 把手缩进框内视觉更干净，右出左进 */
+.dag-node :deep(.vue-flow__handle) { width: 7px; height: 7px;
+                                    background: #5a5a60; border: none; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
        margin-right: 6px; background: #86868b; }
 .hint { color: var(--dim, #86868b); font-size: 12px; margin: 6px 10px; }
