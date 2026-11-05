@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from ..config import CAPABILITIES_DIR, DATA_DIR, RUNS_DIR, SANDBOX_DIR, WORKER_PYTHON
-from ..db import tx
+from ..db import connect, tx
 from ..gateway import core as gateway
 from ..log import get_logger
 
@@ -31,17 +31,31 @@ class RunResult:
 
 
 def run_capability(
-    conn,
     cap_row,
     task_id: int | None,
     step_id: int | None,
     payload: dict,
     timeout_s: int = 300,
 ) -> RunResult:
-    """执行一个能力。执行前过网关（风险分级/审批/暂停检查），结果与审计落库。
-
+    """执行一个能力。**内部自开/自关 sqlite 连接**（并行安全的前提：跨线程共享
+    一条连接会在并发写下互相踩），执行前过网关，结果与审计落库。
     返回 RunResult；被网关拦下时 ok=False 且 error 给出可直接展示给用户的原因。
     """
+    conn = connect()
+    try:
+        return _run_with_conn(conn, cap_row, task_id, step_id, payload, timeout_s)
+    finally:
+        conn.close()
+
+
+def _run_with_conn(
+    conn,
+    cap_row,
+    task_id: int | None,
+    step_id: int | None,
+    payload: dict,
+    timeout_s: int,
+) -> RunResult:
     name, risk, entry = cap_row["name"], cap_row["risk_level"], cap_row["entry"]
 
     verdict = gateway.check(conn, name, risk, task_id, json.dumps(payload, ensure_ascii=False)[:200])

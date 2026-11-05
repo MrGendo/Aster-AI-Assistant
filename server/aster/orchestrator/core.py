@@ -196,14 +196,14 @@ async def execute(task_id: int) -> None:
                 except Exception:
                     pass
             fetch_res = await asyncio.to_thread(
-                runner.run_capability, conn, fetch_cap, task_id, None,
+                runner.run_capability, fetch_cap, task_id, None,
                 {"query": query or None, "limit": 30}, timeout_s=60,
             )
             items = fetch_res.output.get("items") if fetch_res.ok else None
             if not items:
                 # 定向检索零命中 → 回退抓 HN 首页（泛热点），仍失败才认输
                 fetch_res = await asyncio.to_thread(
-                    runner.run_capability, conn, fetch_cap, task_id, None,
+                    runner.run_capability, fetch_cap, task_id, None,
                     {"query": None, "limit": 30}, timeout_s=60,
                 )
                 items = fetch_res.output.get("items") if fetch_res.ok else None
@@ -219,7 +219,7 @@ async def execute(task_id: int) -> None:
                 (json.dumps(payload, ensure_ascii=False), int(time.time()), step["id"]),
             )
         result = await asyncio.to_thread(
-            runner.run_capability, conn, cap, task_id, step["id"], payload
+            runner.run_capability, cap, task_id, step["id"], payload
         )
         # 结果落盘路径回填任务，详情页/答案卡可加载完整 JSON（事件卡渲染依赖它）
         with tx(conn):
@@ -296,24 +296,23 @@ async def _execute_planned(conn, task) -> bool | None:
             )
     _set_status(conn, task["id"], tsm.EXECUTING)
 
+    PARALLEL_CAP = 3  # 并发上限：单用户机器的保守值（防协作失控闸之一）
+
     outputs: dict[int, dict] = {}
     step_rows = conn.execute(
         "SELECT * FROM task_steps WHERE task_id=? ORDER BY seq", (task["id"],)
     ).fetchall()
+    row_by_seq = {r["seq"]: r for r in step_rows}
     deadline = time.time() + 1800  # 失控闸二：总超时 30 分钟
 
-    for row in step_rows:
-        st = steps[row["seq"] - 1]
-        if time.time() > deadline:
-            _fail(conn, task["id"], "任务超过总时限（30 分钟）被中止")
-            return True
-        if conn.execute("SELECT cancel_requested FROM tasks WHERE id=?",
-                        (task["id"],)).fetchone()[0]:
-            _set_status(conn, task["id"], tsm.CANCELLED)
-            return True
+    def _deps_done(st: dict) -> bool:
+        return all(int(m.group(1)) in outputs
+                   for v in (st.get("input") or {}).values()
+                   if (m := re.match(r"^\$(\d+)\.", str(v))))
 
-        # 占位符替换：$N.key → 上游输出值（PRD §7.3 交接包最小实现）
-        # 解包规则：引用键恰为 output_key 时拿到的是整份输出；若输出内含同名字段则取该字段
+    async def _run_one(st: dict) -> "runner.RunResult":
+        """单个步骤执行（能力运行自开连接，与并行兄弟步骤互不干扰）"""
+        row = row_by_seq[st["seq"]]
         payload = {}
         for k, v in (st.get("input") or {}).items():
             m = re.match(r"^\$(\d+)\.(\w+)$", str(v))
@@ -324,45 +323,74 @@ async def _execute_planned(conn, task) -> bool | None:
             if isinstance(val, dict) and m.group(2) in val:
                 val = val[m.group(2)]
             payload[k] = val
-
-        result = None
-        # 伪能力 llm_verify：对上游输出做 LLM 评审（不进注册表，不走网关子进程）
         if st["capability"] == "llm_verify":
-            result = await asyncio.to_thread(_llm_verify, st.get("verify", "输出质量合格"),
-                                             goal, outputs)
-        elif st["capability"] == "llm_task":
-            result = await asyncio.to_thread(_llm_task, payload)
-        else:
-            for cand in [st["capability"]] + list(st.get("fallback") or []):
-                cap = registry.get_active(conn, cand)
-                if not cap:
-                    continue
-                result = await asyncio.to_thread(
-                    runner.run_capability, conn, cap, task["id"], row["id"], payload)
-                if result.ok:
-                    break
-                if result.pending_approval:
-                    _set_status(conn, task["id"], tsm.AWAITING_USER)
-                    with tx(conn):
-                        conn.execute("UPDATE tasks SET error=?, updated_at=? WHERE id=?",
-                                     (result.error, int(time.time()), task["id"]))
-                        conn.execute("UPDATE task_steps SET status='pending', error=? WHERE id=?",
-                                     (result.error, row["id"]))
-                    return True
-                log.info("步骤 %s 能力 %s 失败，尝试接管", row["seq"], cand)
-        if not result or not result.ok:
-            reason = result.error if result else "无可用能力"
-            with tx(conn):
-                conn.execute("UPDATE task_steps SET status='failed', error=?, finished_at=? "
-                             "WHERE id=?", (reason, int(time.time()), row["id"]))
-            _fail(conn, task["id"], f"步骤 {row['seq']} 失败：{reason}")
-            return True
+            return await asyncio.to_thread(_llm_verify, st.get("verify", "输出质量合格"),
+                                           goal, outputs)
+        if st["capability"] == "llm_task":
+            return await asyncio.to_thread(_llm_task, payload)
+        result = None
+        for cand in [st["capability"]] + list(st.get("fallback") or []):
+            cap = registry.get_active(conn, cand)
+            if not cap:
+                continue
+            result = await asyncio.to_thread(
+                runner.run_capability, cap, task["id"], row["id"], payload)
+            if result.ok or result.pending_approval:
+                return result
+            log.info("步骤 %s 能力 %s 失败，尝试接管", st["seq"], cand)
+        return result or runner.RunResult(False, 0, {}, "无可用能力（含 fallback）")
 
-        # 输出按声明的 output_key 寻址：引用该键即得整份输出（dict 由消费方序列化）
-        outputs[row["seq"]] = {st.get("output_key") or "output": result.output}
-        with tx(conn):
-            conn.execute("UPDATE task_steps SET status='done', output_ref=?, finished_at=? "
-                         "WHERE id=?", (str(result.output)[:2000], int(time.time()), row["id"]))
+    remaining = {st["seq"]: st for st in steps}
+    while remaining:
+        if time.time() > deadline:
+            _fail(conn, task["id"], "任务超过总时限（30 分钟）被中止")
+            return True
+        if conn.execute("SELECT cancel_requested FROM tasks WHERE id=?",
+                        (task["id"],)).fetchone()[0]:
+            _set_status(conn, task["id"], tsm.CANCELLED)
+            return True
+        # 就绪集：依赖全部完成的步骤，按并发上限切片并行
+        ready = [st for st in remaining.values() if _deps_done(st)]
+        if not ready:
+            _fail(conn, task["id"], "计划存在无法满足的依赖（疑似环）")
+            return True
+        batch = ready[:PARALLEL_CAP]
+        results = await asyncio.gather(*[_run_one(st) for st in batch])
+        # fail-fast：批次内任一失败/挂起即终止（先落同批成功者的输出再判断）
+        stopped = None
+        for st, result in zip(batch, results):
+            row = row_by_seq[st["seq"]]
+            if result and result.ok:
+                outputs[st["seq"]] = {st.get("output_key") or "output": result.output}
+                with tx(conn):
+                    conn.execute("UPDATE task_steps SET status='done', output_ref=?, "
+                                 "finished_at=? WHERE id=?",
+                                 (str(result.output)[:2000], int(time.time()), row["id"]))
+            elif result and result.pending_approval:
+                stopped = ("awaiting", st, result)
+                break
+            else:
+                stopped = ("failed", st, result)
+                break
+        if stopped:
+            kind, st, result = stopped
+            row = row_by_seq[st["seq"]]
+            if kind == "awaiting":
+                _set_status(conn, task["id"], tsm.AWAITING_USER)
+                with tx(conn):
+                    conn.execute("UPDATE tasks SET error=?, updated_at=? WHERE id=?",
+                                 (result.error, int(time.time()), task["id"]))
+                    conn.execute("UPDATE task_steps SET status='pending', error=? WHERE id=?",
+                                 (result.error, row["id"]))
+            else:
+                reason = result.error if result else "无可用能力"
+                with tx(conn):
+                    conn.execute("UPDATE task_steps SET status='failed', error=?, finished_at=? "
+                                 "WHERE id=?", (reason, int(time.time()), row["id"]))
+                _fail(conn, task["id"], f"步骤 {st['seq']} 失败：{reason}")
+            return True
+        for st in batch:
+            remaining.pop(st["seq"])
 
     # 交付：最后一步输出即交付物；评审步通过与否已在循环内判定
     _set_status(conn, task["id"], tsm.VERIFYING)
@@ -385,7 +413,7 @@ async def _prefetch_pages(conn, task_id: int, output: dict) -> dict:
         return output
     try:
         res = await asyncio.to_thread(
-            runner.run_capability, conn, cap, task_id, None,
+            runner.run_capability, cap, task_id, None,
             {"urls": [it["url"] for it in targets]}, timeout_s=60,
         )
         if not res.ok:

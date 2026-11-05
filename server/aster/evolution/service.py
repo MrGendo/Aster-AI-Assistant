@@ -176,7 +176,7 @@ async def run_replay(conn: sqlite3.Connection, proposal_id: int | None) -> dict:
                         "criteria": "输出切题且包含具体事实或结果，不是拒绝、报错或空洞回复"}
                        for k, v in results.items()]
         gres = await asyncio.to_thread(
-            _runner.run_capability, conn, gcap, None, None, {"items": grade_items},
+            _runner.run_capability, gcap, None, None, {"items": grade_items},
             timeout_s=600)
         if gres.ok:
             quality = gres.output

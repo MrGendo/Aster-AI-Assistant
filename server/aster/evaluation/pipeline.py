@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 
-from ..db import tx
+from ..db import connect, tx
 from ..discovery import gh
 from ..log import get_logger
 from ..providers import router as provider
@@ -71,12 +71,16 @@ def advance(conn, candidate_id: int, nxt: str) -> bool:
     return True
 
 
-def _collect_facts(conn, repo_url: str) -> dict:
-    """用 repo_analysis 能力采集单仓事实（失败返回 {"error": …}，流水线不中断）"""
-    cap = registry.get_active(conn, "repo_analysis")
+def _collect_facts(repo_url: str) -> dict:
+    """用 repo_analysis 能力采集单仓事实（自开连接并行安全；失败返回 {"error": …}，不中断流水线）"""
+    conn = connect()
+    try:
+        cap = registry.get_active(conn, "repo_analysis")
+    finally:
+        conn.close()
     if not cap:
         return {"error": "repo_analysis 能力不可用"}
-    res = runner.run_capability(conn, cap, task_id=None, step_id=None,
+    res = runner.run_capability(cap, task_id=None, step_id=None,
                                 payload={"repo_url": repo_url}, timeout_s=240)
     return res.output if res.ok else {"error": res.error}
 
@@ -98,16 +102,16 @@ async def evaluate(conn: sqlite3.Connection, candidate_id: int) -> dict:
              if p["repo_url"] != cand["repo_url"]][:MAX_PEERS]
 
     # 2) 事实采集：主角 + peers（串行，控制负载）
-    facts = {cand["repo_url"]: await asyncio.to_thread(_collect_facts, conn, cand["repo_url"])}
+    facts = {cand["repo_url"]: await asyncio.to_thread(_collect_facts, cand["repo_url"])}
     for p in peers:
-        facts[p["repo_url"]] = await asyncio.to_thread(_collect_facts, conn, p["repo_url"])
+        facts[p["repo_url"]] = await asyncio.to_thread(_collect_facts, p["repo_url"])
 
     # 3) 客观质量分（OpenSSF Scorecard）并入材料——高质量维度用权威客观数据
     quality = {"error": "repo_quality 能力不可用"}
     qcap = registry.get_active(conn, "repo_quality")
     if qcap:
         qres = await asyncio.to_thread(
-            runner.run_capability, conn, qcap, None, None,
+            runner.run_capability, qcap, None, None,
             {"repo_url": cand["repo_url"]}, timeout_s=30)
         quality = qres.output if qres.ok else {"error": qres.error}
 
