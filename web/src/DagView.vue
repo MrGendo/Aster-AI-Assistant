@@ -58,9 +58,14 @@ const edges = computed(() => {
         id: `${d}->${s.seq}`, source: String(d), target: String(s.seq),
         type: "smoothstep",
         animated: s.status === "running",
-        // 实测反馈：无边箭头看不懂方向——补箭头并加深线条
-        markerEnd: MarkerType.ArrowClosed,
-        style: { stroke: "#5a5a60", strokeWidth: 1.6 },
+        // 对象形式显式给颜色：枚举简写的默认 markerColor 曾渲染不出箭头（实测反馈）
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: "#5a5a60",
+          width: 22,
+          height: 22,
+        },
+        style: { stroke: "#5a5a60", strokeWidth: 1.8 },
       });
     }
   }
