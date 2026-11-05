@@ -45,10 +45,11 @@ def classify(goal: str) -> str:
         return "mem0_add"
     if re.match(r"^(回忆|你记得|查一下记忆)", goal):
         return "mem0_search"
-    # 待办：前缀强意图（"待办：X"/"添加待办 X"）；列出用固定短语。
+    # 待办：前缀强意图（"待办：X"/"帮我加个待办 X"/"提醒我 X"）；列出用固定短语。
     # 完成勾选故意不做对话路由——口语指代易错位，UI 点击才可靠
-    if (re.match(r"^(待办|todo)[:：]", goal, re.IGNORECASE)
-            or re.match(r"^(添加|记个|记一个|新增|加一个)(一个)?待办", goal)):
+    if (re.match(r"^(帮我|请|给我)?(待办|todo)[:：]", goal, re.IGNORECASE)
+            or re.match(r"^(帮我|请|给我)?(添加|加|记|新增)(一个|条|个)?待办", goal)
+            or re.match(r"^(帮我|请)?提醒我", goal)):
         return "todo_add"
     if re.search(r"看看待办|待办列表|我的待办|列出待办", goal):
         return "todo_list"

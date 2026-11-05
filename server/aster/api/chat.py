@@ -15,8 +15,11 @@ router = APIRouter(tags=["chat"])
 
 def _todo_add(message: str) -> str:
     """对话加待办：剥前缀后走统一语法解析，入库后回执"""
-    text = re.sub(r"^(待办|todo)[:：]|^(添加|记个|记一个|新增|加一个)(一个)?待办[:：，,\s]*",
-                  "", message, flags=re.IGNORECASE).strip()
+    text = re.sub(
+        r"^(帮我|请|给我)?(待办|todo)[:：]"
+        r"|^(帮我|请|给我)?(添加|加|记|新增)(一个|条|个)?待办[:：，,\s]*"
+        r"|^(帮我|请)?提醒我[:：，,\s]*",
+        "", message, flags=re.IGNORECASE).strip()
     parsed = todo_logic.parse_content(text)
     conn = connect()
     try:

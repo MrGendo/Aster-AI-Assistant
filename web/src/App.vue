@@ -1,7 +1,7 @@
 <script setup>
 // Aster 平台 Phase 1 前端：四个一级页面（PRD §10.2）
 // 视觉基线遵循 PRD §10.7：中性色为主、状态色语义化、清晰层级、无装饰性动画
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import ResultView from "./ResultView.vue";
 
 const tab = ref("home");
@@ -267,6 +267,8 @@ onMounted(() => {
   // 待审批/任务状态自动刷新：否则审批角标不出现，用户只能干等（实测反馈）
   setInterval(refresh, 5000);
 });
+// 切到待办页时重拉：在首页对话里加的待办否则看不到（实测踩坑）
+watch(tab, (t) => { if (t === "todos") loadTodos(); });
 </script>
 
 <template>
