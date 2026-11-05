@@ -695,6 +695,8 @@ button.tiny, .tiny { font-size: 12px; padding: 3px 10px; }
 h1 { font-size: 20px; margin: 0 0 16px; } h2 { font-size: 15px; margin: 20px 0 10px; }
 textarea, input, select { width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 10px;
        background: var(--card); color: var(--text); font: inherit; }
+/* 勾选框豁免：不吃全宽+内边距（待办/任务行里曾被撑成占满整行的大块，实测反馈） */
+input[type="checkbox"] { width: auto; padding: 0; accent-color: var(--accent); }
 textarea { resize: vertical; }
 .row { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
 .row.spread { justify-content: space-between; }
