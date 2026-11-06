@@ -83,3 +83,34 @@ def test_distill_skips_chat_intent():
     core._distill_memory(conn, cur.lastrowid, "这是一段足够长的结论" + "字" * 60)
     conn.close()
     assert not called
+
+
+def test_regression_gate_semantics():
+    """准出凭据三态：从未执行=免检放行（防停用死锁）/ 最近失败=拦 / 全过=放行"""
+    import json as _j
+    from aster.evaluation import regression as reg
+    conn = connect()
+    migrate(conn)
+    conn.execute("INSERT INTO capabilities(name, kind, descriptor_json, status, source, "
+                 "version, risk_level, entry, created_at, updated_at) "
+                 "VALUES('t_cap','tool','{}','active','builtin','0','L0','x',0,0)")
+    cid = conn.execute("SELECT id FROM capabilities WHERE name='t_cap'").fetchone()["id"]
+    conn.execute("DELETE FROM eval_cases WHERE capability='t_cap'")
+    conn.execute("INSERT INTO eval_cases(capability, name, goal, expect, enabled, created_at) "
+                 "VALUES('t_cap','c1','g','e',1,0)")
+    conn.commit()
+    ok, why = reg.regression_ok(conn, "t_cap")
+    assert ok and "免检" in why or ok  # 从未执行 → 放行
+    conn.execute("UPDATE eval_cases SET last_result_json=?, finished_at=1 WHERE capability='t_cap'",
+                 (_j.dumps({"passed": True}),))
+    conn.commit()
+    assert reg.regression_ok(conn, "t_cap")[0] is True
+    conn.execute("UPDATE eval_cases SET last_result_json=? WHERE capability='t_cap'",
+                 (_j.dumps({"passed": False}),))
+    conn.commit()
+    ok, why = reg.regression_ok(conn, "t_cap")
+    assert not ok and "c1" in why
+    conn.execute("DELETE FROM eval_cases WHERE capability='t_cap'")
+    conn.execute("DELETE FROM capabilities WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()

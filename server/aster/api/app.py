@@ -3,7 +3,7 @@ from ..db import connect, migrate
 from ..gateway import core as gateway
 from ..providers import router as provider
 from ..runtime import registry
-from . import caps, chat, discovery, evolution, memories, schedules, system, tasks, todos
+from . import caps, chat, discovery, evals, evolution, memories, schedules, system, tasks, todos
 
 
 def create_app() -> "FastAPI":
@@ -49,6 +49,7 @@ def create_app() -> "FastAPI":
     app.include_router(chat.router, prefix="/api")
     app.include_router(todos.router, prefix="/api")
     app.include_router(schedules.router, prefix="/api")
+    app.include_router(evals.router, prefix="/api")
 
     # 前端产物：构建后由服务直接托管（API 路由先注册，静态挂载兜底其余路径）
     from starlette.staticfiles import StaticFiles

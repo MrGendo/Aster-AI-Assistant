@@ -258,6 +258,31 @@ const todoShown = computed(() => {
   return [...todoList.value.pending, ...todoList.value.done].filter(match);
 });
 
+// 回归评测（QA 平台化）：能力徽标 / 执行 / 教训沉淀
+const evalCases = ref([]);
+const lessons = ref([]);
+async function loadEval() { evalCases.value = await api("/eval/cases"); }
+async function loadLessons() { lessons.value = await api("/lessons"); }
+function evalBadge(name) {
+  const mine = evalCases.value.filter((c) => c.capability === name || c.capability === "*");
+  if (!mine.length) return "";
+  const passed = mine.filter((c) => {
+    try { return JSON.parse(c.last_result_json || "{}").passed; } catch { return false; }
+  }).length;
+  return `${passed}/${mine.length} 用例`;
+}
+async function runEval(name) {
+  const r = await api("/eval/run", { method: "POST", body: JSON.stringify({ capability: name }) });
+  alert(r.error ? `回归失败：${r.error}` : `回归完成：通过率 ${r.pass_rate}，质量 ${r.quality_pass_rate}`);
+  loadEval();
+}
+async function lessonToCase(id) {
+  const r = await api(`/lessons/${id}/to_case`, { method: "POST", body: JSON.stringify({}) });
+  if (r.error) return alert(r.error);
+  alert(`已沉淀为回归用例：${r.goal.slice(0, 60)}…`);
+  loadEval();
+}
+
 // 定时调度与通知（APScheduler 后端的界面侧）
 const schedules = ref([]);
 const notifications = ref([]);
@@ -315,7 +340,8 @@ onMounted(() => {
   setInterval(() => { refresh(); loadNotifications(); }, 5000);
 });
 // 切到待办页时重拉：在首页对话里加的待办否则看不到（实测踩坑）
-watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSchedules(); });
+watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSchedules();
+                      if (t === "disc") loadLessons(); if (t === "caps") loadEval(); });
 </script>
 
 <template>
@@ -517,6 +543,18 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSched
                         @approve="approveAndRetry" @reject="(aid) => rejectApproval(aid)" />
           </div>
         </template>
+
+        <!-- 集成教训 → 一键沉淀为回归用例（经验驱动 → 规则化闭环） -->
+        <h2>集成教训</h2>
+        <p class="hint">踩过的坑一键转为回归用例，能力变更时由门禁自动守住</p>
+        <div v-for="l in lessons" :key="l.id" class="card task-row">
+          <span class="tag">{{ l.stage_failed }}</span>
+          <span class="goal">{{ l.reason.slice(0, 70) }}</span>
+          <span class="row-actions">
+            <button class="ghost" @click="lessonToCase(l.id)">沉淀为用例</button>
+          </span>
+        </div>
+        <p v-if="!lessons.length" class="empty">还没有教训记录——失败并不可怕，可怕的是不留痕</p>
       </section>
 
       <!-- 能力中心 -->
@@ -536,6 +574,9 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSched
           </div>
           <p>{{ JSON.parse(c.descriptor_json).purpose }}</p>
           <p class="meta">风险 {{ c.risk_level }} · 输入 {{ JSON.parse(c.descriptor_json).input }} · {{ JSON.parse(c.descriptor_json).cost }}</p>
+          <p v-if="evalBadge(c.name)" class="meta">
+            回归 {{ evalBadge(c.name) }} · <button class="ghost tiny" @click.stop="runEval(c.name)">跑回归</button>
+          </p>
         </div>
       </section>
 

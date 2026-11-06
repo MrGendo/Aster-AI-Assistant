@@ -156,3 +156,57 @@ def replan(conn: sqlite3.Connection, goal: str, done: list[dict],
         # 拒因留痕：没有它只能盲猜 LLM 违了哪条契约
         log.info("重规划被硬校验拒绝，原始计划：%s", json.dumps(plan, ensure_ascii=False)[:500])
     return steps or None
+
+
+REVIEW_PROMPT = """你是计划质量评审（对应"方案设计评审"环节）。按检查单审查这份多步计划，
+只输出 JSON：{{"issues":["问题1","问题2"]}}（无问题输出 {{"issues":[]}}）。
+检查单：
+1. 产出报告/结论/对外引用数据的步骤之后是否都有 llm_verify 评审步把关？
+2. 涉及联网/浏览/外部资源（L1 风险）的步骤是否声明了 fallback 或 on_fail？
+3. 各步骤验收是否可判（desc/output_key 是否明确）？
+4. 依赖引用是否让关键产出必然被使用（有无孤儿产出）？
+目标：{goal}
+计划：{steps}"""
+
+
+def review_plan(conn: sqlite3.Connection, task_id: int | None,
+                goal: str, steps: list[dict]) -> list[dict]:
+    """方案级质量评审：发现问题带清单重生成一次（仍过硬校验）；
+    重生成失败/无效则用原计划（评审是增强不是阻断）。token 入账。"""
+    if not provider.available():
+        return steps
+    try:
+        raw, used = provider.chat_with_usage(
+            [{"role": "user", "content": goal}],
+            system=REVIEW_PROMPT.format(
+                goal=goal, steps=json.dumps(steps, ensure_ascii=False)[:3000]),
+            max_tokens=400)
+        if task_id and used:
+            from ..orchestrator.core import _add_usage
+            _add_usage(conn, task_id, tokens=used)
+        d = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+        issues = [i for i in (d.get("issues") or []) if isinstance(i, str) and i.strip()]
+    except Exception as e:
+        log.info("计划评审执行失败（用原计划）: %s", e)
+        return steps
+    if not issues:
+        log.info("计划评审通过，无问题")
+        return steps
+    log.info("计划评审发现 %d 个问题，重生成：%s", len(issues), "；".join(issues)[:200])
+    try:
+        raw2, used2 = provider.chat_with_usage(
+            [{"role": "user", "content": goal}],
+            system=PLAN_PROMPT.format(n=MAX_STEPS, goal=goal, caps=_cap_lines(conn))
+            + "\n\n上一版计划评审发现以下问题，必须全部修复：\n- " + "\n- ".join(issues),
+            max_tokens=1200)
+        if task_id and used2:
+            from ..orchestrator.core import _add_usage
+            _add_usage(conn, task_id, tokens=used2)
+        plan2 = json.loads(raw2[raw2.index("{"): raw2.rindex("}") + 1])
+        if isinstance(plan2, dict) and not plan2.get("steps") and isinstance(plan2.get("plan"), list):
+            plan2 = {"steps": plan2["plan"]}
+        steps2 = validate_plan(plan2, conn)
+        return steps2 or steps
+    except Exception as e:
+        log.info("评审修补重生成失败（用原计划）: %s", e)
+        return steps

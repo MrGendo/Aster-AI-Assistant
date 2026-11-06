@@ -2,6 +2,7 @@
 from fastapi import APIRouter, HTTPException
 
 from ..db import connect
+from ..evaluation import regression
 
 router = APIRouter(tags=["capabilities"])
 
@@ -20,7 +21,28 @@ def list_caps() -> list[dict]:
 
 
 @router.post("/capabilities/{name}/enable")
-def enable_cap(name: str) -> dict:
+def enable_cap(name: str, force: int = 0) -> dict:
+    # 准出门禁（QA 平台化）：最近一次回归失败的能力不可启用；
+    # force=1 人工越过（合法通道：越过记录进审计日志，事后补回归）
+    conn = connect()
+    try:
+        ok, reason = regression.regression_ok(conn, name)
+    finally:
+        conn.close()
+    if not ok:
+        if not force:
+            raise HTTPException(409, f"回归门禁未通过：{reason}。请先执行 /api/eval/run 或 force=1 人工越过（留痕）")
+        import time as _t
+        from ..db import connect as _c, tx as _tx
+        c2 = _c()
+        try:
+            with _tx(c2):
+                c2.execute(
+                    "INSERT INTO tool_calls(capability, risk, status, args_digest, "
+                    "started_at, finished_at) VALUES('gate_override','L1','success',?,?,?)",
+                    (f"人工越过 {name} 启用门禁：{reason}", int(_t.time()), int(_t.time())))
+        finally:
+            c2.close()
     return _set_status(name, "active")
 
 

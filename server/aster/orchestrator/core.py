@@ -193,21 +193,25 @@ async def execute(task_id: int) -> None:
                 _set_status(conn, task_id, tsm.VERIFYING)
                 if len(md) > 200:
                     summary = f"{md[:1200]}\n\n（完整报告已存 {path}）"
-                    # 交付终检（P0 质量门，report 专属分支同通用路径待遇）
+                    # 交付终检（P0 质量门）+ 质量报告落库（QA §B）
+                    verdict, reason = "未适用", ""
                     if provider.available():
                         gate = await asyncio.to_thread(
                             _llm_verify, conn, task_id, DELIVERY_VERIFY["report"], task["goal"],
                             {"summary": summary[:3000]})
-                        if gate.ok:
-                            summary += "\n\n✓ 已通过独立评审（结论有据/来源可核验/无编造）"
-                        else:
-                            summary += f"\n\n⚠ 交付终检未通过：{gate.error or '质量存疑'}（结果保留供人工核验）"
-                            _set_status(conn, task_id, tsm.PARTIAL)
-                            with tx(conn):
-                                conn.execute("UPDATE tasks SET result_summary=?, result_ref=?, "
-                                             "updated_at=? WHERE id=?",
-                                             (summary, str(path), int(time.time()), task_id))
-                            return
+                        verdict = "通过" if gate.ok else "未通过"
+                        reason = "" if gate.ok else (gate.error or "质量存疑")
+                        summary += ("\n\n✓ 已通过独立评审（结论有据/来源可核验/无编造）" if gate.ok
+                                    else f"\n\n⚠ 交付终检未通过：{reason}（结果保留供人工核验）")
+                    _write_quality(conn, task_id, {"type": "report", "交付终检": verdict,
+                                                   "长度校验": True, "gate_reason": reason})
+                    if verdict == "未通过":
+                        _set_status(conn, task_id, tsm.PARTIAL)
+                        with tx(conn):
+                            conn.execute("UPDATE tasks SET result_summary=?, result_ref=?, "
+                                         "updated_at=? WHERE id=?",
+                                         (summary, str(path), int(time.time()), task_id))
+                        return
                     _finish(conn, task_id, summary=summary, ref=str(path))
                 else:
                     _fail(conn, task_id, "报告生成过短，未通过验证")
@@ -349,6 +353,11 @@ async def execute(task_id: int) -> None:
                         summary += "\n\n✓ 已通过独立评审（结论有据/来源可核验/无编造）"
                     else:
                         summary += f"\n\n⚠ 交付终检未通过：{gate.error or '质量存疑'}（结果保留供人工核验）"
+                        _write_quality(conn, task_id, {
+                            "type": "capability", "结构校验": True, "交付终检": "未通过",
+                            "evidence_sources": len(result.output.get("sources") or []),
+                            "gate_reason": gate.error or "质量存疑",
+                        })
                         _set_status(conn, task_id, tsm.PARTIAL)
                         with tx(conn):
                             conn.execute("UPDATE tasks SET result_summary=?, result_ref=?, "
@@ -360,6 +369,13 @@ async def execute(task_id: int) -> None:
                 # 深度调研的下载件是 markdown 报告本体而非 JSON 明细
                 ref = (result.output.get("report_path")
                        if intent == "deep_research" else result.output_path) or ""
+                _write_quality(conn, task_id, {
+                    "type": "capability",
+                    "结构校验": True,
+                    "交付终检": ("通过" if crit else "未适用") if not crit
+                    else ("通过" if gate.ok else "未通过"),
+                    "evidence_sources": len(result.output.get("sources") or []),
+                })
                 _finish(conn, task_id, summary=summary, ref=ref)
             else:
                 _fail(conn, task_id, "结果未通过结构校验（关键字段缺失），已保留原始输出供查看")
@@ -392,6 +408,8 @@ async def _execute_planned(conn, task) -> bool | None:
     if not steps:
         log.info("任务 %s 规划失败，回退对话路径", task["id"])
         return False
+    # 方案级质量评审（QA 平台化 §B）：检查单评审，带问题清单重生成一次
+    steps = await asyncio.to_thread(planner_mod.review_plan, conn, task["id"], goal, steps)
 
     # 计划落库（含依赖与输出键，UI/审计可查）
     import time as _t
@@ -601,8 +619,28 @@ async def _execute_planned(conn, task) -> bool | None:
     last = outputs[max(outputs)]
     summary = last.get("digest_markdown") or last.get("text") or last.get("summary") \
         or last.get("result") or json.dumps(last, ensure_ascii=False)[:600]
+    # 质量报告（QA §B）：验证链/降级项的结构化聚合，结果页质量卡用
+    _write_quality(conn, task["id"], {
+        "type": "planned",
+        "steps_total": len(steps),
+        "reviews": [{"step": s["seq"], "pass": bool(outputs.get(s["seq"], {}).get("pass"))}
+                    for s in steps if s.get("capability") == "llm_verify"
+                    and s["seq"] in outputs],
+        "skipped": [s["seq"] for s in steps if s["seq"] not in outputs],
+        "replanned": replanned,
+    })
     _finish(conn, task["id"], summary=summary)
     return True
+
+
+def _write_quality(conn: sqlite3.Connection, task_id: int, report: dict) -> None:
+    """质量报告落库（各执行路径统一出口；失败不影响交付）"""
+    try:
+        with tx(conn):
+            conn.execute("UPDATE tasks SET quality_json=? WHERE id=?",
+                         (json.dumps(report, ensure_ascii=False), task_id))
+    except Exception as e:
+        log.info("质量报告写入失败（不影响交付）: %s", e)
 
 
 async def _prefetch_pages(conn, task_id: int, output: dict) -> dict:

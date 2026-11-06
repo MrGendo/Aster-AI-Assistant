@@ -1,7 +1,7 @@
 # 进化中心 API：提案/实验/应用/回滚（PRD §14.2）
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from ..db import connect, tx
 from ..evolution import service as evo
@@ -40,11 +40,50 @@ async def experiment(pid: int) -> dict:
 
 
 @router.post("/proposals/{pid}/apply")
-def apply_proposal(pid: int, body: dict | None = None) -> dict:
+def apply_proposal(pid: int, bg: BackgroundTasks, body: dict | None = None) -> dict:
     actor = "human" if (body or {}).get("human") else "system"
     conn = connect()
     try:
-        return evo.apply(conn, pid, actor=actor)
+        r = evo.apply(conn, pid, actor=actor)
+        # 准出闭环（QA 平台化）：应用成功后后台自动跑全局回归，
+        # 通过率低于 evo.regression_floor（默认 0.6）→ 自动回滚 + 通知
+        if r.get("ok"):
+            bg.add_task(_post_apply_regression, pid)
+        return r
+    finally:
+        conn.close()
+
+
+async def _post_apply_regression(pid: int) -> None:
+    import asyncio as _a
+    import json as _j
+    conn = connect()
+    try:
+        from ..evaluation import regression
+        result = await regression.run_eval(conn, "*")
+        if not result.get("ok"):
+            return
+        floor_row = conn.execute(
+            "SELECT value FROM settings WHERE key='evo.regression_floor'").fetchone()
+        try:
+            floor = float(floor_row["value"]) if floor_row else 0.6
+        except (TypeError, ValueError):
+            floor = 0.6
+        ran, ok_n = result["ran"], int(result["pass_rate"].split("/")[0])
+        rate = ok_n / ran if ran else 1.0
+        if rate < floor:
+            evo.rollback(conn, pid)
+            from .. import scheduler as job_sched
+            job_sched._notify("task_done",
+                              f"提案 #{pid} 应用后回归通过率 {result['pass_rate']} 低于门槛 "
+                              f"{floor:.0%}，已自动回滚")
+        else:
+            with tx(conn):
+                conn.execute(
+                    "UPDATE improvement_proposals SET experiment_result_json=? WHERE id=?",
+                    (_j.dumps({"post_apply_regression": result["pass_rate"],
+                               "quality": result.get("quality_pass_rate")},
+                              ensure_ascii=False), pid))
     finally:
         conn.close()
 

@@ -38,6 +38,14 @@ async function toggleStep(sid) {
 
 // 本任务待审批单
 const approvalsFor = (tid) => props.pending.filter((a) => a.task_id === tid);
+
+// 质量报告（库列为字符串，安全解析）
+import { computed } from "vue";
+const qj = computed(() => {
+  try { return typeof props.task.quality_json === "string"
+    ? JSON.parse(props.task.quality_json) : props.task.quality_json; }
+  catch { return null; }
+});
 </script>
 
 <template>
@@ -63,6 +71,33 @@ const approvalsFor = (tid) => props.pending.filter((a) => a.task_id === tid);
 
     <div v-if="task.cancel_requested && !isTerminal(task.status)" class="warn-note">
       已收到取消请求，将在当前步骤停止后生效
+    </div>
+
+    <!-- 质量报告（QA）：验证链与证据的结构化呈现，未验证事项显式列出 -->
+    <div v-if="qj && isTerminal(task.status)" class="quality-card">
+      <div class="q-head">质量报告</div>
+      <div v-if="qj.结构校验 !== undefined" class="q-row">
+        <span>结构校验</span><b>{{ qj.结构校验 ? '✓ 通过' : '✗ 未过' }}</b>
+      </div>
+      <div v-if="qj.交付终检" class="q-row">
+        <span>交付终检</span>
+        <b :class="{ bad: qj.交付终检 === '未通过' }">
+          {{ qj.交付终检 === '通过' ? '✓ 通过' : qj.交付终检 === '未通过' ? '✗ 未通过' : '· 未适用' }}</b>
+      </div>
+      <div v-if="qj.evidence_sources !== undefined" class="q-row">
+        <span>证据来源</span><b>{{ qj.evidence_sources }} 条</b>
+      </div>
+      <div v-if="qj.reviews?.length" class="q-row">
+        <span>步骤评审</span>
+        <b>{{ qj.reviews.filter(r => r.pass).length }}/{{ qj.reviews.length }} 通过</b>
+      </div>
+      <div v-if="qj.skipped?.length" class="q-row">
+        <span>降级跳过</span><b>步骤 {{ qj.skipped.join('、') }}</b>
+      </div>
+      <div v-if="qj.replanned" class="q-row">
+        <span>失败恢复</span><b>曾重规划</b>
+      </div>
+      <div v-if="qj.gate_reason" class="q-note">{{ qj.gate_reason }}</div>
     </div>
 
     <!-- 审批：批准/拒绝事件抛给父级处理（批准后自动续跑的策略归父级） -->
@@ -164,4 +199,12 @@ a.hottitle:hover { color: #316ef3; }
 .hotmeta { display: flex; gap: 10px; font-size: 12px; color: var(--dim); margin-top: 3px; align-items: center; }
 .heat { color: #d97a06; }
 .tag { background: var(--bg); border-radius: 6px; padding: 0 6px; font-size: 12px; color: var(--dim); }
+/* 质量报告卡 */
+.quality-card { border: 1px solid var(--line); border-left: 3px solid #2f9e63;
+                border-radius: 10px; margin: 8px 0; padding: 8px 12px; }
+.q-head { font-size: 12px; font-weight: 700; color: var(--dim); letter-spacing: 2px; margin-bottom: 4px; }
+.q-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; }
+.q-row span { color: var(--dim); }
+.q-row b.bad { color: #d64545; }
+.q-note { font-size: 12px; color: #d97a06; margin-top: 4px; }
 </style>
