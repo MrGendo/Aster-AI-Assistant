@@ -31,8 +31,27 @@ def history(conn: sqlite3.Connection, conversation_id: int) -> list[dict]:
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
+def _capability_manifest(conn: sqlite3.Connection) -> str:
+    """平台能力清单注入 chat 人格——没有它模型会以"裸模型"身份否认平台实际
+    拥有的能力（实测：用户要定时器，平台明明有闹钟却答"我做不到"）"""
+    import json as _json
+    rows = conn.execute(
+        "SELECT name, descriptor_json, status FROM capabilities WHERE status='active'").fetchall()
+    lines = [f"- {r['name']}：{_json.loads(r['descriptor_json']).get('purpose', '')[:60]}"
+             for r in rows]
+    return (
+        "你运行在 Aster 平台上，以下是平台【实际拥有】的能力，回答前先对照——"
+        "用户想要的事若平台做得到，绝不允许说\"我无法/我没有这个功能\"，"
+        "而应告诉用户直接的说法（平台按句式自动路由）：\n" + "\n".join(lines) +
+        "\n常用触发说法：\"提醒我 30 分钟后休息\"（闹钟）｜\"每天 9 点给我热点日报\"（定时任务）"
+        "｜\"帮我加个待办：明天交报告 (A)\"｜\"深度调研：某主题\"（联网调研出带引用报告）"
+        "｜\"分析 https://github.com/xx/yy\"（仓库分析）｜\"规划执行：A 然后 B\"（多能力协作）。\n"
+        "平台边界（如实说明，不夸大）：能自动进化运行参数、能走评估流程吸收开源项目为新能力；"
+        "但不能凭空编写全新功能代码。")
+
+
 def converse(conn: sqlite3.Connection, conversation_id: int, message: str) -> str:
-    """一轮对话：存用户消息 → 组上下文（历史+记忆注入）→ GLM 回复 → 存回复"""
+    """一轮对话：存用户消息 → 组上下文（历史+记忆注入+能力清单）→ GLM 回复 → 存回复"""
     with tx(conn):
         conn.execute(
             "INSERT INTO messages(conversation_id, role, content, created_at) VALUES(?,?,?,?)",
@@ -43,7 +62,8 @@ def converse(conn: sqlite3.Connection, conversation_id: int, message: str) -> st
     messages = history(conn, conversation_id)
     injection = memory_svc.context_injection(conn, message)
     system = ("你是 Aster，务实、诚实的个人智能助手。用中文回答；无法确定的事直说，"
-              "不编造。可以参考历史对话与已知用户背景。"
+              "不编造。可以参考历史对话与已知用户背景。\n\n"
+              + _capability_manifest(conn)
               + (f"\n\n{injection}" if injection else ""))
     reply = provider.chat(messages, system=system)
     with tx(conn):

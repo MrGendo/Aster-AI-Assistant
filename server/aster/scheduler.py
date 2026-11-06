@@ -49,6 +49,15 @@ def parse_when(text: str) -> dict | None:
         return {"type": "interval", "minutes": int(m.group(1))}
     if m := _EVERY_HOUR_RE.search(text):
         return {"type": "interval", "hours": int(m.group(1))}
+    # 裸"N分钟/N小时"（无"每/每隔/后"）：口语里"定时10分钟"=10分钟后一次性（实测踩坑）
+    if (m := _AFTER_MIN_RE.search(text) or re.search(r"(\d+)\s*分钟", text)) \
+            and not re.search(r"每|每隔", text):
+        n = int(m.group(1))
+        return {"type": "date", "run_at": (now + timedelta(minutes=n)).timestamp()}
+    if (m := _AFTER_HOUR_RE.search(text) or re.search(r"(\d+)\s*小时", text)) \
+            and not re.search(r"每|每隔", text):
+        n = int(m.group(1))
+        return {"type": "date", "run_at": (now + timedelta(hours=n)).timestamp()}
     if m := _ABS_RE.search(text):
         dt = datetime.strptime(f"{m.group(1)} {m.group(2)}:{m.group(3)}", "%Y-%m-%d %H:%M")
         if dt <= now:

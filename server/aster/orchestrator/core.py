@@ -57,8 +57,17 @@ def classify(goal: str) -> str:
     if (re.match(r"^(帮我|请)?提醒我", goal)
             and (job_sched.parse_when(goal) or job_sched.looks_periodic(goal))):
         return "alarm"
+    # "帮我定时一个任务10分钟""设个10分钟的倒计时"——用户真实说法不含"提醒我"（实测踩坑）
+    if (re.search(r"定时|倒计时", goal)
+            and re.search(r"\d+\s*(分钟|小时|秒)|每天|每隔", goal)
+            and not GITHUB_RE.search(goal)):
+        return "alarm"
     if job_sched.looks_periodic(goal) and re.search(r"推送|日报|执行|跑|总结|调研|分析|抓取|任务|提醒", goal):
         return "schedule"
+    # "去github找一个高星项目"：平台有联网调研与发现评估管线——不该落 chat 被否认（实测踩坑）
+    if re.search(r"github", goal, re.IGNORECASE) and re.search(r"找|搜|查|推荐|高星|star", goal, re.IGNORECASE) \
+            and not GITHUB_RE.search(goal):
+        return "deep_research"
     # 待办：前缀强意图（"待办：X"/"帮我加个待办 X"/"提醒我 X"）；列出用固定短语。
     # 完成勾选故意不做对话路由——口语指代易错位，UI 点击才可靠
     if (re.match(r"^(帮我|请|给我)?(待办|todo)[:：]", goal, re.IGNORECASE)

@@ -80,7 +80,10 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
     if intent in ("alarm", "schedule"):
         from .. import scheduler as job_sched
         kind = "alarm" if intent == "alarm" else "task"
-        content = re.sub(r"^(帮我|请)?提醒我[:：，,\s]*", "", message).strip() or message
+        content = re.sub(
+            r"^(帮我|请)?提醒我[:：，,\s]*"
+            r"|^(帮我|请)?(定时(一个)?(任务|提醒)?|设(一个)?(倒计时|定时(任务)?))[:：，,\s]*",
+            "", message, flags=0).strip() or message
         goal = content if kind == "alarm" else message  # 定时任务保留全句（后续分类依赖"日报"等词）
         row, err = job_sched.create(kind, goal, message)
         if err:
