@@ -1,3 +1,6 @@
+# 主 venv 依赖（主板 + L0/L1 能力工人）
+# 注：gpt-researcher 阵营（deep_research）装在独立 venv .venvs/deep_research，
+# 与 browser-use 的 mcp 版本阵营互斥，见 README「快速开始」第 2 步
 fastapi
 uvicorn[standard]
 pydantic
@@ -7,3 +10,6 @@ httpx
 jieba
 pytest
 pytest-asyncio
+apscheduler==3.11.3
+browser-use
+mem0ai

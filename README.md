@@ -52,8 +52,8 @@ Aster 是一个跑在本地的自进化智能体平台：FastAPI 主板统一负
 
 ```bash
 # 1. 依赖（Python 3.10+）
-python3 -m venv .venv && .venv/bin/pip install -r server/requirements.txt 2>/dev/null || .venv/bin/pip install fastapi uvicorn anthropic apscheduler markdown
-.venv/bin/pip install browser-use mem0ai promptfoo gpt-researcher ddgs langchain-mcp-adapters langchain-anthropic langchain-huggingface sentence-transformers
+python3 -m venv .venv
+.venv/bin/pip install -r server/requirements.txt
 
 # 2. deep_research 用独立 venv（gpt-researcher 依赖阵营与 browser-use 互斥，架构级隔离）
 .venv/bin/python -m venv .venvs/deep_research
