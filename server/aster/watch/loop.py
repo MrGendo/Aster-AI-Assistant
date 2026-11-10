@@ -34,13 +34,9 @@ def check_once() -> int:
         for w in rows:
             head = _head_of(w["repo_url"])
             if head and w["last_head"] and head != w["last_head"]:
-                with conn:
-                    conn.execute(
-                        "INSERT INTO tasks(goal, intent, status, created_at, updated_at) "
-                        "VALUES(?,?,?,?,?)",
-                        (f"关注仓库有更新：{w['repo_url']}（HEAD {head[:8]}）", "chat",
-                         "pending", now, now),
-                    )
+                # 写通知而非建任务：chat 意图任务无人执行会堆积成僵尸（实测 19 条卡 pending）
+                from ..scheduler import _notify
+                _notify("watch", f"关注仓库有更新：{w['repo_url']}（HEAD {head[:8]}）")
                 changed += 1
             if head:
                 with conn:

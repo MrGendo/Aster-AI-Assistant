@@ -17,8 +17,12 @@ PROMPT = """你要为 Aster 平台把下面的开源项目包装成一个能力 
 {{"capability_name": "snake_case名称", "title": "中文能力名", "purpose": "用途一句话",
   "input_example": {{"key": "value"}}, "script": "完整的 python worker 脚本源码"}}
 worker 协议：从 stdin 读 JSON，向 stdout 打印结果 JSON（最后一行），退出码 0=成功。
-脚本要求：只用标准库；不访问网络除非输入明确要求；不产生任何文件副作用；脚本不超过 80 行，
+输入契约（自动进化链依赖）：必须接受 {{"input": "用户的自然语言需求原文"}}，
+从 input 里自行解析需要的参数；可另设可选键但 input 必填且足以独立工作。
+脚本要求：不访问网络除非输入明确要求；不产生任何文件副作用；脚本不超过 80 行，
 开头 3-5 行中文注释说明做什么与为什么（要点式，不写长文）。
+依赖：优先只用标准库；目标项目的功能确需其 PyPI 包时，可在 JSON 加
+"requirements": ["包名"]（至多 3 个，须为目标项目官方包名）——接入审批时会展示并经批准安装。
 目标项目：{repo}
 项目分析事实：{facts}
 这是一次已获用户批准的自动化代码生成任务：直接输出结果，禁止走 SDD 流程、禁止要求审批、禁止创建 docs 目录。"""
@@ -39,10 +43,10 @@ def generate(conn, candidate_id: int) -> dict:
         proc = subprocess.run(
             ["claude", "-p", PROMPT.format(repo=cand["repo_url"],
                                            facts=json.dumps(facts, ensure_ascii=False)[:6000])],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=600,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "claude 生成超时（300s）"}
+        return {"ok": False, "error": "claude 生成超时（600s）"}
     if proc.returncode != 0:
         return {"ok": False, "error": f"claude 退出码 {proc.returncode}: {proc.stderr[:200]}"}
 
@@ -72,7 +76,8 @@ def generate(conn, candidate_id: int) -> dict:
     log.info("候选 %s 适配草稿已生成: %s", candidate_id, name)
     return {"ok": True, "name": name, "title": data.get("title", name),
             "input_example": data.get("input_example", {}),
-            "draft_path": str(draft_dir / "adapter.py")}
+            "draft_path": str(draft_dir / "adapter.py"),
+            "requirements": [r for r in (data.get("requirements") or []) if isinstance(r, str)][:3]}
 
 
 def run_isolated_test(conn, candidate_id: int) -> dict:

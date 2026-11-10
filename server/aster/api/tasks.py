@@ -97,8 +97,9 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
         if not row:
             raise HTTPException(404, "任务不存在")
         if row["status"] not in ("failed", "cancelled", "partial", "awaiting_user", "pending"):
-            # awaiting_user：审批后续跑；pending：后台任务崩溃后的自愈重试（都曾是真的坑）
             raise HTTPException(409, "仅失败/取消/部分完成/等待确认/待处理的任务可重试")
+        if orchestrator.is_running(task_id):
+            raise HTTPException(409, "任务正在执行中，等它到终态或审批口再重试")
         from .. import tsm as tsm_mod
         with conn:
             # 复用原任务：回置待处理并清掉错误与取消标志（新一次执行的历史在 runs 里可追溯）
@@ -111,7 +112,15 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
                 "UPDATE runs SET step_id=NULL WHERE step_id IN "
                 "(SELECT id FROM task_steps WHERE task_id=?)", (task_id,),
             )
-            conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
+            # evolve 意图保留步骤：断点续跑依赖已完成阶段的状态（审批通过后的
+            # 重试若清步骤会重烧搜索/文档/生成五个阶段并循环要审批）
+            _intent = conn.execute("SELECT intent FROM tasks WHERE id=?",
+                                   (task_id,)).fetchone()["intent"]
+            if _intent != "evolve":
+                conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
+            else:
+                conn.execute("UPDATE task_steps SET status='pending' WHERE task_id=? AND status IN "
+                             "('running','failed')", (task_id,))
             goal = conn.execute("SELECT goal FROM tasks WHERE id=?", (task_id,)).fetchone()["goal"]
         bg.add_task(_recreate_and_run, task_id, goal)
         return {"ok": True, "id": task_id}
@@ -120,11 +129,17 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
 
 
 async def _recreate_and_run(task_id: int, goal: str) -> None:
-    # 简化重试：直接按原目标重新规划执行（沿用同一任务行）
+    # 简化重试：直接按原目标重新规划执行（沿用同一任务行）。
+    # evolve 例外：保留库内 intent 与已完成步骤——断点续跑（重分类会把进化请求
+    # 重新落到 chat/deep_research，且清步骤=重烧五阶段+循环要审批）
     import time as _t
     conn = connect()
     try:
-        intent = orchestrator.classify(goal)
+        current = conn.execute("SELECT intent FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if current and current["intent"] == "evolve":
+            intent = "evolve"
+        else:
+            intent = orchestrator.classify(goal)
         with conn:
             conn.execute("UPDATE tasks SET intent=?, updated_at=? WHERE id=?",
                          (intent, int(_t.time()), task_id))

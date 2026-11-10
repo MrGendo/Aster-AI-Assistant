@@ -76,6 +76,10 @@ def classify(goal: str) -> str:
         return "todo_add"
     if re.search(r"看看待办|待办列表|我的待办|列出待办", goal):
         return "todo_list"
+    # 自动进化：显式要求平台自己去找/吸收开源项目补能力（task_gap 闭环）
+    if re.search(r"自己进化|自主进化|自动进化|去找(一)?个.*项目|找个能做|集成(一)?个.{0,10}项目|吸收(一)?个", goal) \
+            and not GITHUB_RE.search(goal):
+        return "evolve"
     # 深度调研：自主联网调研主题出报告——该能力自带研究规划，不拆多步路径。
     # "全面调研"从复合连接词移出归本规则（本身就是单能力强意图）；带仓库链接/顺序复合仍让路
     if (re.search(r"深度调研|深入调研|全面调研", goal)
@@ -102,19 +106,23 @@ def classify(goal: str) -> str:
                 [{"role": "user", "content": goal}],
                 system=(
                     "你是任务意图分类器。只输出以下标签之一，不要解释：\n"
-                    "repo_analysis（分析 GitHub 仓库）/ repo_quality（仓库质量评分）/ "
-                    "text_stats（文本统计）/ hot_news（热点整理成日报）/ "
-                    "report（把素材写成报告）/ deep_research（联网深度调研某主题）/ "
+                    "repo_analysis（输入是 GitHub 仓库链接做分析）/ repo_quality（仓库健康度评分）/ "
+                    "text_stats（仅限：统计字符数/行数/词频）/ hot_news（把给定的热点素材整理成日报）/ "
+                    "report（把给定素材写成报告）/ deep_research（联网调研某主题出报告）/ "
                     "mem0_add（记住某事）/ mem0_search（查询记忆）/ "
-                    "browser（浏览某网页）/ planned（明确的多步复合目标）/ "
-                    "chat（普通对话，其他所有）"
+                    "browser（浏览某网页）/ planned（能用上述能力组合完成的多步目标）/ "
+                    "gap（是明确的任务请求，但上述任何能力在语义上都做不了——"
+                    "比如格式转换/生成/计算/编码等平台没有的能力）/ "
+                    "chat（普通对话，其他所有）。\n"
+                    "关键：不要凑近似的标签——\"转成摩尔斯电码\"不是 text_stats（不是统计字数），"
+                    "应选 gap。只有语义精确匹配才选对应能力。"
                 ),
                 max_tokens=20,
             )
             label = answer.strip().lower()
             if label in ("repo_analysis", "repo_quality", "text_stats", "hot_news",
                          "report", "deep_research", "mem0_add", "mem0_search",
-                         "browser", "planned", "chat"):
+                         "browser", "planned", "gap", "chat"):
                 return label
         except Exception as e:  # 模型失败不阻塞：回落 chat
             log.warning("意图分类模型调用失败，回落 chat: %s", e)
@@ -122,8 +130,12 @@ def classify(goal: str) -> str:
 
 
 def create_task(conn: sqlite3.Connection, goal: str, project_id=None) -> int:
+    return create_task_with_intent(conn, goal, classify(goal), project_id)
+
+
+def create_task_with_intent(conn: sqlite3.Connection, goal: str, intent: str,
+                            project_id=None) -> int:
     now = int(time.time())
-    intent = classify(goal)
     with tx(conn):
         cur = conn.execute(
             "INSERT INTO tasks(goal, intent, status, project_id, created_at, updated_at) "
@@ -168,14 +180,44 @@ def _set_status(conn, task_id: int, nxt: str) -> None:
                      (nxt, int(time.time()), task_id))
 
 
+# 任务执行互斥：同一任务并发两个执行器会互相覆盖步骤与 plan_json（实测：重试时
+# 旧执行器未死，晚到的脏 ctx 覆盖新跑，生成了错误候选的适配器）
+_running_tasks: set[int] = set()
+
+
+def is_running(task_id: int) -> bool:
+    """是否有执行器在跑（retry 端点防在跑中重入——实测：重入会把状态踩回 pending，
+    与运行中执行器的状态迁移互撞 IllegalTransition）"""
+    return task_id in _running_tasks
+
+
 async def execute(task_id: int) -> None:
     """任务执行主循环（后台任务）。每一步之间检查取消请求与审批状态。"""
+    if task_id in _running_tasks:
+        log.warning("任务 %s 已有执行器在跑，跳过重复执行", task_id)
+        return
+    _running_tasks.add(task_id)
+    try:
+        await _execute_locked(task_id)
+    finally:
+        _running_tasks.discard(task_id)
+
+
+async def _execute_locked(task_id: int) -> None:
     conn = connect()
     try:
         task = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         if not task:
             return
         intent = task["intent"]
+
+        # 自动进化路径（task_gap 闭环）：缺口→GitHub 搜索→吸收→新能力完成原请求
+        if intent == "evolve":
+            from ..evolution import autoevolve
+            _set_status(conn, task_id, tsm.PLANNING)
+            autoevolve.ensure_steps(conn, task_id)
+            await autoevolve.run(conn, task_id, task["goal"])
+            return
 
         # 计划路径：LLM 产出多步协作计划；规划失败回退 chat（任务不因规划器而失败）
         if intent == "planned":

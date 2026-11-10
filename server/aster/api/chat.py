@@ -93,6 +93,37 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
                if row["next_run_at"] else "")
         label = "闹钟已设" if kind == "alarm" else "定时任务已建"
         return {"type": "todo", "reply": f"{label}：{row['goal'][:60]}（{job_sched.describe_trigger(tj)}{nxt}）"}
+    # 缺口分支（自动进化）：必须在通用任务分支之前——否则 gap 标签会被当成
+    # 普通任务意图建了无执行器的任务（实测踩坑：intent=gap 的任务空转失败）
+    if intent == "gap":
+        if not provider.available():
+            return {"type": "error",
+                    "error": "自动进化需要模型，当前未配置"}
+        conn = connect()
+        try:
+            from ..evolution import autoevolve
+            gap = autoevolve.detect_gap(conn, message) or {"need": message[:60], "query": ""}
+            gap["query"] = autoevolve.sanitize_query(message, gap.get("query", ""))
+            from ..orchestrator import core as _orch
+            task_id = _orch.create_task_with_intent(conn, message, "evolve")
+            with tx(conn):
+                conn.execute("UPDATE tasks SET plan_json=? WHERE id=?",
+                             (json.dumps(gap, ensure_ascii=False), task_id))
+                if conversation_id and conn.execute(
+                        "SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone():
+                    now2 = int(time.time())
+                    conn.execute("INSERT INTO messages(conversation_id, role, content, created_at) "
+                                 "VALUES(?,?,?,?)", (conversation_id, "user", message, now2))
+                    conn.execute("INSERT INTO messages(conversation_id, role, content, created_at) "
+                                 "VALUES(?,?,?,?)",
+                                 (conversation_id, "assistant",
+                                  f"检测到能力缺口：{gap['need']}。已启动自动进化任务 #{task_id}——"
+                                  f"将去 GitHub 搜索（仅吸收 5000★ 以上项目），进度见任务卡", now2))
+        finally:
+            conn.close()
+        bg.add_task(_run, task_id)
+        return {"type": "task", "id": task_id, "conversation_id": conversation_id}
+
     if intent != "chat":
         conn = connect()
         try:

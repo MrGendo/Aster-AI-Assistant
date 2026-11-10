@@ -403,6 +403,15 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSched
                 <button class="ghost tiny" @click="tab = 'tasks'; toggleDetail(m.id)">详情</button>
               </div>
               <div class="task-goal">{{ taskCards[m.id].goal }}</div>
+              <!-- 紧凑步骤列表：进度与流程在聊天卡内实时可见（自动进化/多步任务） -->
+              <div v-if="(taskCards[m.id].steps || []).length" class="task-steps">
+                <div v-for="s in taskCards[m.id].steps" :key="s.id" class="mini-step"
+                     :class="s.status">
+                  <span class="ic">{{ s.status === 'done' ? '✓' : s.status === 'running' ? '▸' :
+                            s.status === 'failed' ? '✗' : s.status === 'skipped' ? '−' : '·' }}</span>
+                  {{ s.step_desc.slice(0, 46) }}
+                </div>
+              </div>
               <div v-for="a in approvalsFor(m.id)" :key="a.id" class="approval-inline">
                 <span>{{ a.reason }}</span>
                 <span>
@@ -721,6 +730,12 @@ main { flex: 1; padding: 28px 36px; max-width: 860px; }
 .task-sum { font-size: 13px; border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
 .approval-inline { display: flex; justify-content: space-between; gap: 8px; align-items: center;
                    background: rgba(217,122,6,.08); border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 13px; }
+.task-steps { margin: 6px 0 2px; display: flex; flex-direction: column; gap: 2px; }
+.mini-step { font-size: 12px; color: var(--dim); display: flex; gap: 6px; }
+.mini-step.done { color: var(--dim); }
+.mini-step.running { color: var(--run); font-weight: 600; }
+.mini-step.failed { color: var(--err); }
+.mini-step .ic { width: 12px; }
 button.tiny, .tiny { font-size: 12px; padding: 3px 10px; }
 /* 侧栏通知铃铛 */
 .bell-wrap { position: relative; margin-top: auto; }
