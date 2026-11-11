@@ -113,6 +113,7 @@ def classify(goal: str) -> str:
                     "browser（浏览某网页）/ planned（能用上述能力组合完成的多步目标）/ "
                     "gap（是明确的任务请求，但上述任何能力在语义上都做不了——"
                     "比如格式转换/生成/计算/编码等平台没有的能力）/ "
+                    "platform（对 Aster 平台自身的功能需求或改进建议，如界面、通知、设置、交互）/ "
                     "chat（普通对话，其他所有）。\n"
                     "关键：不要凑近似的标签——\"转成摩尔斯电码\"不是 text_stats（不是统计字数），"
                     "应选 gap。只有语义精确匹配才选对应能力。"
@@ -122,7 +123,7 @@ def classify(goal: str) -> str:
             label = answer.strip().lower()
             if label in ("repo_analysis", "repo_quality", "text_stats", "hot_news",
                          "report", "deep_research", "mem0_add", "mem0_search",
-                         "browser", "planned", "gap", "chat"):
+                         "browser", "planned", "gap", "platform", "chat"):
                 return label
         except Exception as e:  # 模型失败不阻塞：回落 chat
             log.warning("意图分类模型调用失败，回落 chat: %s", e)

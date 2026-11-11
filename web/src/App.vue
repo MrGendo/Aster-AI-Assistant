@@ -295,6 +295,14 @@ async function markAllRead() {
   loadNotifications();
 }
 const unreadCount = computed(() => notifications.value.filter((n) => !n.read).length);
+// 阅读后不再显示（用户 2026-11-11 需求）：面板合上即视为已读，角标自动清零；
+// 通知仍在列表可回看，只是不再以未读形式反复出现
+watch(notifOpen, async (open) => {
+  if (!open && unreadCount.value) {
+    await api("/notifications/read", { method: "POST", body: JSON.stringify({ ids: [] }) });
+    loadNotifications();
+  }
+});
 // 触发描述（与后端 describe_trigger 同义，展示用）
 function schedDesc(s) {
   const t = JSON.parse(s.trigger_json || "{}");
@@ -321,6 +329,13 @@ async function delSched(id) { await api(`/schedules/${id}`, { method: "DELETE" }
 const convList = ref([]);
 const convPanel = ref(false);
 async function loadConvList() { convList.value = await api("/conversations"); }
+async function delConversation(cid) {
+  // 不可逆删除：二次确认；删的是当前会话则同时清空对话流回到空态
+  if (!confirm("删除这个会话及其全部消息？不可恢复。")) return;
+  await api(`/conversations/${cid}`, { method: "DELETE" });
+  if (convId.value === cid) { convId.value = null; thread.value = []; }
+  loadConvList();
+}
 async function openConversation(cid) {
   if (!cid) return;
   convId.value = cid;
@@ -401,7 +416,10 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSched
           <div v-for="c in convList" :key="c.id" class="conv-item"
                :class="{ cur: c.id === convId }" @click="openConversation(c.id)">
             <span class="conv-title">{{ (c.title || '对话').slice(0, 26) }}</span>
-            <span class="hint">{{ c.n }} 条 · {{ new Date((c.last_at || c.created_at) * 1000).toLocaleString() }}</span>
+            <span class="row" style="gap:8px;margin:0">
+              <span class="hint">{{ c.n }} 条 · {{ new Date((c.last_at || c.created_at) * 1000).toLocaleString() }}</span>
+              <button class="ghost danger tiny" @click.stop="delConversation(c.id)">删除</button>
+            </span>
           </div>
           <p v-if="!convList.length" class="empty" style="padding:10px">还没有历史会话</p>
         </div>

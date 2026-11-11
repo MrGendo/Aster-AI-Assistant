@@ -124,6 +124,36 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
         bg.add_task(_run, task_id)
         return {"type": "task", "id": task_id, "conversation_id": conversation_id}
 
+    # 平台自身功能需求（第三档）：吸收开源库解决不了，也不该让 persona 空口否认——
+    # 自动落待办（开发者可见的改进清单），回复如实说明能力边界
+    if intent == "platform":
+        import time as _pt
+        conn = connect()
+        try:
+            with tx(conn):
+                conn.execute(
+                    "INSERT INTO todos(content, priority, source, created_at) VALUES(?,?,?,?)",
+                    (f"[平台需求] {message[:180]}", "B", "agent", int(_pt.time())))
+        finally:
+            conn.close()
+        reply = ("这是对 Aster 平台自身的功能需求。平台可以自动进化吸收外部开源能力，"
+                 "但修改平台自身代码需要开发者实现——已自动记录到你的待办清单"
+                 "（含原始描述），可在待办页管理或转任务跟进。")
+        if conversation_id:
+            conn = connect()
+            try:
+                cid = chat_svc.get_or_create(conn, conversation_id)
+                now2 = int(time.time())
+                with tx(conn):
+                    conn.execute("INSERT INTO messages(conversation_id, role, content, created_at) "
+                                 "VALUES(?,?,?,?)", (cid, "user", message, now2))
+                    conn.execute("INSERT INTO messages(conversation_id, role, content, created_at) "
+                                 "VALUES(?,?,?,?)", (cid, "assistant", reply, now2))
+            finally:
+                conn.close()
+            return {"type": "chat", "conversation_id": conversation_id, "reply": reply}
+        return {"type": "chat", "conversation_id": None, "reply": reply}
+
     if intent != "chat":
         conn = connect()
         try:
@@ -169,6 +199,20 @@ def conversations() -> list[dict]:
     conn = connect()
     try:
         return chat_svc.list_conversations(conn)
+    finally:
+        conn.close()
+
+
+@router.delete("/conversations/{cid}")
+def delete_conversation(cid: int) -> dict:
+    """删除会话及其消息（用户数据删除：不可逆，前端二次确认）"""
+    from ..db import tx
+    conn = connect()
+    try:
+        with tx(conn):
+            cur = conn.execute("DELETE FROM messages WHERE conversation_id=?", (cid,))
+            conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
+        return {"ok": cur.rowcount >= 0, "deleted_messages": cur.rowcount}
     finally:
         conn.close()
 
