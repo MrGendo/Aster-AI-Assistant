@@ -25,8 +25,10 @@ STAGES = [
 ]
 
 
-def _sh(cmd: list[str], cwd: str = None, timeout: int = 120) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+def _sh(cmd: list[str], cwd: str = None, timeout: int = 120,
+        env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          cwd=cwd, env=env)
 
 
 def ensure_steps(conn, task_id: int) -> None:

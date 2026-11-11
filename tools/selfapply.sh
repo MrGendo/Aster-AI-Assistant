@@ -7,11 +7,12 @@ TASK_ID="$1"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 
-notify() {  # 通知 + 任务状态回写（kind/task_id/text）
+notify() {  # 通知 + 任务状态回写（kind/task_id/text）——用绝对路径（cwd 可能在 web/）
   "$PY" - "$1" "$2" "$3" <<'PYEOF'
-import sys, sqlite3, time, subprocess
+import sys, sqlite3, time, os
 kind, tid, text = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-conn = sqlite3.connect("data/aster.db")
+conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.dirname(
+    sys.executable)), "data", "aster.db"))
 conn.execute("INSERT INTO notifications(kind, text, ref_task_id, created_at) VALUES(?,?,?,?)",
              (kind, text, tid, int(time.time())))
 if kind != "alarm":
