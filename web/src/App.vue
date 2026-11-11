@@ -710,6 +710,8 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSched
           <p v-if="sys" class="meta">
             模型：{{ sys.provider.model }}（{{ sys.provider.base_url }}）· 密钥 …{{ sys.provider.key_tail || "未配置" }}
           </p>
+          <!-- 启用能力数随 /system/status 一起返回，refresh() 时自动更新 -->
+          <p v-if="sys" class="meta">启用能力：{{ sys.enabledCapabilities ?? 0 }} 个</p>
         </div>
 
         <div class="card">

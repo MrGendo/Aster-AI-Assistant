@@ -12,10 +12,15 @@ def status() -> dict:
     conn = connect()
     try:
         from ..providers import router as provider
+        # 启用数＝status='active' 的能力条数（enable/disable 端点即写 active/disabled）
+        enabled = conn.execute(
+            "SELECT COUNT(*) FROM capabilities WHERE status='active'"
+        ).fetchone()[0]
         return {
             "paused": gateway.is_paused(conn),
             "provider_ready": provider.available(),
             "provider": _safe_provider_info(conn),
+            "enabledCapabilities": enabled,
             "db": str(__import__("aster.config", fromlist=["DB_PATH"]).DB_PATH),
         }
     finally:
