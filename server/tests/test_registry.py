@@ -39,3 +39,25 @@ def test_candidate_not_callable():
     with conn:
         conn.execute("UPDATE capabilities SET status='candidate' WHERE name='repo_analysis'")
     assert registry.get_active(conn, "repo_analysis") is None
+
+
+def test_status_counts_enabled_capabilities():
+    """系统状态接口只统计 active 能力：disabled/candidate 不计入启用数"""
+    from aster.api.system import status
+    # 不清表（capabilities 被 task_steps 外键引用，全量跑时清表会违反约束），按基线差值断言
+    base = conn.execute(
+        "SELECT COUNT(*) FROM capabilities WHERE status='active'"
+    ).fetchone()[0]
+    with conn:
+        conn.execute(
+            "INSERT INTO capabilities(name, kind, descriptor_json, status, source, "
+            "version, risk_level, entry, created_at, updated_at) VALUES "
+            "('cap_a','tool','{}','active','builtin','0.1.0','L0','a.py',0,0),"
+            "('cap_b','tool','{}','disabled','builtin','0.1.0','L0','b.py',0,0),"
+            "('cap_c','tool','{}','candidate','builtin','0.1.0','L0','c.py',0,0)"
+        )
+    try:
+        assert status()["enabledCapabilities"] == base + 1
+    finally:
+        with conn:
+            conn.execute("DELETE FROM capabilities WHERE name IN ('cap_a','cap_b','cap_c')")
