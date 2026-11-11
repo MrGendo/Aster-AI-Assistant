@@ -124,8 +124,8 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
         bg.add_task(_run, task_id)
         return {"type": "task", "id": task_id, "conversation_id": conversation_id}
 
-    # 平台自身功能需求（第三档）：吸收开源库解决不了，也不该让 persona 空口否认——
-    # 自动落待办（开发者可见的改进清单），回复如实说明能力边界
+    # 平台自身功能需求（第四档——自改闭环）：claude 在隔离分支实现 → 测试门 →
+    # L2 人批 diff → 合并重启。仍同步落一条待办留痕（可追溯）。
     if intent == "platform":
         import time as _pt
         conn = connect()
@@ -134,25 +134,23 @@ async def chat_entry(body: dict, bg: BackgroundTasks) -> dict:
                 conn.execute(
                     "INSERT INTO todos(content, priority, source, created_at) VALUES(?,?,?,?)",
                     (f"[平台需求] {message[:180]}", "B", "agent", int(_pt.time())))
-        finally:
-            conn.close()
-        reply = ("这是对 Aster 平台自身的功能需求。平台可以自动进化吸收外部开源能力，"
-                 "但修改平台自身代码需要开发者实现——已自动记录到你的待办清单"
-                 "（含原始描述），可在待办页管理或转任务跟进。")
-        if conversation_id:
-            conn = connect()
-            try:
-                cid = chat_svc.get_or_create(conn, conversation_id)
+            from ..orchestrator import core as _orch
+            task_id = _orch.create_task_with_intent(conn, message, "self_improve")
+            if conversation_id and conn.execute(
+                    "SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone():
                 now2 = int(time.time())
                 with tx(conn):
                     conn.execute("INSERT INTO messages(conversation_id, role, content, created_at) "
-                                 "VALUES(?,?,?,?)", (cid, "user", message, now2))
+                                 "VALUES(?,?,?,?)", (conversation_id, "user", message, now2))
                     conn.execute("INSERT INTO messages(conversation_id, role, content, created_at) "
-                                 "VALUES(?,?,?,?)", (cid, "assistant", reply, now2))
-            finally:
-                conn.close()
-            return {"type": "chat", "conversation_id": conversation_id, "reply": reply}
-        return {"type": "chat", "conversation_id": None, "reply": reply}
+                                 "VALUES(?,?,?,?)",
+                                 (conversation_id, "assistant",
+                                  f"平台自改任务 #{task_id} 已启动：将在隔离分支实现该需求，"
+                                  f"过测试与人工审批后自动应用并重启。进度见任务卡", now2))
+        finally:
+            conn.close()
+        bg.add_task(_run, task_id)
+        return {"type": "task", "id": task_id, "conversation_id": conversation_id}
 
     if intent != "chat":
         conn = connect()

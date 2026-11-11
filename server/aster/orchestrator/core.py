@@ -220,6 +220,14 @@ async def _execute_locked(task_id: int) -> None:
             await autoevolve.run(conn, task_id, task["goal"])
             return
 
+        # 平台自改路径（第四档）：隔离分支实现→测试门→L2 人批→合并重启
+        if intent == "self_improve":
+            from ..evolution import selfimprove
+            _set_status(conn, task_id, tsm.PLANNING)
+            selfimprove.ensure_steps(conn, task_id)
+            await selfimprove.run(conn, task_id, task["goal"])
+            return
+
         # 计划路径：LLM 产出多步协作计划；规划失败回退 chat（任务不因规划器而失败）
         if intent == "planned":
             ok = await _execute_planned(conn, task)

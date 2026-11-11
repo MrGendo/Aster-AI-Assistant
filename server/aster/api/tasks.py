@@ -116,7 +116,7 @@ def retry_task(task_id: int, bg: BackgroundTasks) -> dict:
             # 重试若清步骤会重烧搜索/文档/生成五个阶段并循环要审批）
             _intent = conn.execute("SELECT intent FROM tasks WHERE id=?",
                                    (task_id,)).fetchone()["intent"]
-            if _intent != "evolve":
+            if _intent not in ("evolve", "self_improve"):
                 conn.execute("DELETE FROM task_steps WHERE task_id=?", (task_id,))
             else:
                 conn.execute("UPDATE task_steps SET status='pending' WHERE task_id=? AND status IN "
@@ -136,8 +136,8 @@ async def _recreate_and_run(task_id: int, goal: str) -> None:
     conn = connect()
     try:
         current = conn.execute("SELECT intent FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if current and current["intent"] == "evolve":
-            intent = "evolve"
+        if current and current["intent"] in ("evolve", "self_improve"):
+            intent = current["intent"]
         else:
             intent = orchestrator.classify(goal)
         with conn:
