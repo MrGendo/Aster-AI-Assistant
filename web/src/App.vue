@@ -317,6 +317,19 @@ async function toggleSched(s) {
 }
 async function delSched(id) { await api(`/schedules/${id}`, { method: "DELETE" }); loadSchedules(); }
 
+// 历史会话面板：开新对话后旧会话仍可查看（数据一直在库，此前无入口）
+const convList = ref([]);
+const convPanel = ref(false);
+async function loadConvList() { convList.value = await api("/conversations"); }
+async function openConversation(cid) {
+  if (!cid) return;
+  convId.value = cid;
+  convPanel.value = false;
+  const d = await api(`/chat/${cid}`);
+  thread.value = d.messages.map((m) => ({ role: m.role, content: m.content }));
+  // 任务卡历史的上下文在当次对话流，历史会话里只呈现文字往来（任务详情在任务中心）
+}
+
 // 对话流自动滚底（学 chatgpt-web：新消息永远在视野内）
 const chatScroll = ref(null);
 watch(() => thread.value.length, async () => {
@@ -380,7 +393,17 @@ watch(tab, (t) => { if (t === "todos") loadTodos(); if (t === "sched") loadSched
         <div class="chat-top">
           <span class="chat-title">对话</span>
           <span class="hint">任务类输入自动走能力 · 结果以任务卡呈现在流里 · 全量历史在任务中心</span>
+          <button class="ghost" @click="convPanel = !convPanel; loadConvList()">历史会话</button>
           <button v-if="convId" class="ghost" @click="newConversation">新对话</button>
+        </div>
+        <!-- 历史会话面板：点标题切回该会话查看全部往来 -->
+        <div v-if="convPanel" class="conv-panel">
+          <div v-for="c in convList" :key="c.id" class="conv-item"
+               :class="{ cur: c.id === convId }" @click="openConversation(c.id)">
+            <span class="conv-title">{{ (c.title || '对话').slice(0, 26) }}</span>
+            <span class="hint">{{ c.n }} 条 · {{ new Date((c.last_at || c.created_at) * 1000).toLocaleString() }}</span>
+          </div>
+          <p v-if="!convList.length" class="empty" style="padding:10px">还没有历史会话</p>
         </div>
         <div class="chat-scroll" ref="chatScroll">
           <div v-if="!thread.length" class="chat-empty">
@@ -723,6 +746,15 @@ main { flex: 1; padding: 28px 36px; max-width: 860px; }
 .bub.bot :is(p, ul, ol) { margin: 4px 0; }
 .bub.bot code { background: rgba(127,127,127,.15); border-radius: 4px; padding: 1px 5px; }
 .chat-input { display: flex; gap: 10px; align-items: flex-end; padding: 12px 0 18px; border-top: 1px solid var(--line); }
+/* 历史会话面板 */
+.conv-panel { border: 1px solid var(--line); border-radius: 10px; margin: 8px 0;
+              max-height: 220px; overflow-y: auto; background: var(--card); }
+.conv-item { display: flex; justify-content: space-between; gap: 10px; padding: 8px 12px;
+             cursor: pointer; border-bottom: 1px solid var(--line); font-size: 13px; }
+.conv-item:last-child { border-bottom: none; }
+.conv-item:hover { background: var(--bg); }
+.conv-item.cur { background: rgba(49,110,243,.08); }
+.conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-input textarea { flex: 1; resize: none; }
 .task-bub { align-self: flex-start; width: 82%; background: var(--card); border: 1px solid var(--line);
             border-left: 3px solid var(--accent); border-radius: 10px; padding: 10px 14px; }

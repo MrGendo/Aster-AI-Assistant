@@ -77,3 +77,14 @@ def thread(conn: sqlite3.Connection, conversation_id: int) -> list[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT id, role, content, created_at FROM messages WHERE conversation_id=? "
         "ORDER BY id LIMIT 200", (conversation_id,))]
+
+
+def list_conversations(conn: sqlite3.Connection, limit: int = 30) -> list[dict]:
+    """会话列表（倒序）：标题 + 最后活跃时间 + 消息数——首页历史会话面板用"""
+    rows = conn.execute(
+        "SELECT c.id, c.title, c.created_at, "
+        "(SELECT count(*) FROM messages m WHERE m.conversation_id=c.id) AS n, "
+        "(SELECT max(created_at) FROM messages m WHERE m.conversation_id=c.id) AS last_at "
+        "FROM conversations c ORDER BY COALESCE(last_at, c.created_at) DESC LIMIT ?",
+        (limit,)).fetchall()
+    return [dict(r) for r in rows]

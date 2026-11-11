@@ -163,6 +163,16 @@ async def _run(task_id: int) -> None:
     await orchestrator.execute(task_id)
 
 
+@router.get("/conversations")
+def conversations() -> list[dict]:
+    """历史会话列表（首页面板用：切换查看旧对话）"""
+    conn = connect()
+    try:
+        return chat_svc.list_conversations(conn)
+    finally:
+        conn.close()
+
+
 @router.get("/chat/latest")
 def chat_latest() -> dict:
     """恢复最近会话（首页加载时续聊；无会话返回 null）"""
